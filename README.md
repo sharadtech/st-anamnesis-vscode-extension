@@ -1,0 +1,1 @@
+# st-anamnesis-vscode-extension
