@@ -1,0 +1,166 @@
+{
+  "name": "anamnesis",
+  "displayName": "Anamnesis Cloud",
+  "description": "Interactive Anamnesis knowledge graphs for AI-assisted coding.",
+  "version": "1.0.0",
+  "publisher": "sharadtech",
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sharadtech/st-anamnesis-vscode-extension"
+  },
+  "keywords": [
+    "anamnesis",
+    "knowledge-graph",
+    "redis",
+    "code-graph",
+    "visualization",
+    "navigation",
+    "graphify",
+    "cloud"
+  ],
+  "galleryBanner": {
+    "color": "#1e1e1e",
+    "theme": "dark"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Visualization",
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:anamnesis.projects"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "anamnesis-graph",
+          "title": "Anamnesis",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "anamnesis-graph": [
+        {
+          "id": "anamnesis.projects",
+          "name": "Projects"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "anamnesis.openGraph",
+        "title": "Anamnesis: Open Knowledge Graph",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "anamnesis.openGraphForTag",
+        "title": "Anamnesis: Open Graph for Project",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "anamnesis.openGraphForFile",
+        "title": "Anamnesis: View in Knowledge Graph",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "anamnesis.refresh",
+        "title": "Anamnesis: Refresh Projects",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "anamnesis.deleteProject",
+        "title": "Anamnesis: Delete Project Graph",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "anamnesis.openSettings",
+        "title": "Anamnesis: Open Settings",
+        "icon": "$(settings-gear)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "anamnesis.refresh",
+          "when": "view == anamnesis.projects",
+          "group": "navigation"
+        },
+        {
+          "command": "anamnesis.openGraph",
+          "when": "view == anamnesis.projects",
+          "group": "navigation"
+        },
+        {
+          "command": "anamnesis.openSettings",
+          "when": "view == anamnesis.projects",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "anamnesis.openGraphForTag",
+          "when": "view == anamnesis.projects && viewItem == project",
+          "group": "inline@1"
+        },
+        {
+          "command": "anamnesis.deleteProject",
+          "when": "view == anamnesis.projects && viewItem == project",
+          "group": "inline@2"
+        },
+        {
+          "command": "anamnesis.deleteProject",
+          "when": "view == anamnesis.projects && viewItem == project",
+          "group": "1_modification@1"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "anamnesis.openGraphForFile",
+          "when": "resourceScheme == file",
+          "group": "navigation@100"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Anamnesis",
+      "properties": {
+        "anamnesis.serverUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Base URL of the Anamnesis Server (no trailing slash)."
+        },
+        "anamnesis.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Bearer token if the server was started with --api-key (optional)."
+        },
+        "anamnesis.defaultTag": {
+          "type": "string",
+          "default": "default",
+          "description": "Default graph tag to load when none is selected."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.js",
+    "package": "node esbuild.js --production && vsce package --no-yarn",
+    "watch": "node esbuild.js --watch",
+    "install-cursor:mac": "npm run build && npm run package && cursor --uninstall-extension sharadtech.anamnesis 2>/dev/null || true && cursor --install-extension ./anamnesis-$(node -p \"require('./package.json').version\").vsix",
+    "install-vscode:mac": "npm run build && npm run package && code --uninstall-extension sharadtech.anamnesis 2>/dev/null || true && code --install-extension ./anamnesis-$(node -p \"require('./package.json').version\").vsix"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.21.0",
+    "typescript": "^5.4.0"
+  }
+}

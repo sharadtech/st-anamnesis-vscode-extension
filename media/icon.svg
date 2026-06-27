@@ -1,0 +1,13 @@
+<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <circle cx="6" cy="6" r="2.5" fill="currentColor"/>
+  <circle cx="18" cy="6" r="2.5" fill="currentColor"/>
+  <circle cx="12" cy="13" r="2.5" fill="currentColor"/>
+  <circle cx="6" cy="18" r="2.5" fill="currentColor"/>
+  <circle cx="18" cy="18" r="2.5" fill="currentColor"/>
+  <line x1="6" y1="6" x2="12" y2="13" stroke="currentColor" stroke-width="1.2"/>
+  <line x1="18" y1="6" x2="12" y2="13" stroke="currentColor" stroke-width="1.2"/>
+  <line x1="12" y1="13" x2="6" y2="18" stroke="currentColor" stroke-width="1.2"/>
+  <line x1="12" y1="13" x2="18" y2="18" stroke="currentColor" stroke-width="1.2"/>
+  <line x1="6" y1="6" x2="18" y2="6" stroke="currentColor" stroke-width="1.2" opacity="0.4"/>
+  <line x1="6" y1="18" x2="18" y2="18" stroke="currentColor" stroke-width="1.2" opacity="0.4"/>
+</svg>
