@@ -2,8 +2,8 @@ import * as vscode from "vscode";
 import { testConnection } from "./api";
 
 /**
- * A graphical editor for the Anamnesis configuration (server URL, API key,
- * default tag). Opened from the gear icon in the Projects view title.
+ * A graphical editor for the Anamnesis configuration (API Base URL, Client Id,
+ * Secret Key, default tag). Opened from the gear icon in the Projects view title.
  *
  * Saves are written to the VS Code `anamnesis.*` configuration scope
  * (Global by default; Workspace if the user picks "Save to Workspace").
@@ -53,7 +53,8 @@ export class SettingsPanel {
     this._panel.webview.postMessage({
       type: "values",
       serverUrl: cfg.get<string>("serverUrl") ?? "",
-      apiKey: cfg.get<string>("apiKey") ?? "",
+      clientId: cfg.get<string>("clientId") ?? "",
+      secretKey: cfg.get<string>("secretKey") ?? "",
       defaultTag: cfg.get<string>("defaultTag") ?? "",
       targets: this._availableTargets(),
     });
@@ -74,7 +75,7 @@ export class SettingsPanel {
 
     if (msg.type === "test") {
       this._panel.webview.postMessage({ type: "testResult", running: true });
-      const res = await testConnection(msg.serverUrl, msg.apiKey);
+      const res = await testConnection(msg.serverUrl, msg.clientId, msg.secretKey);
       this._panel.webview.postMessage({
         type: "testResult",
         running: false,
@@ -95,7 +96,8 @@ export class SettingsPanel {
             : vscode.ConfigurationTarget.Global;
 
         await cfg.update("serverUrl", this._normalizeUrl(msg.serverUrl), target);
-        await cfg.update("apiKey", this._normalizeStr(msg.apiKey), target);
+        await cfg.update("clientId", this._normalizeStr(msg.clientId), target);
+        await cfg.update("secretKey", this._normalizeStr(msg.secretKey), target);
         await cfg.update("defaultTag", this._normalizeStr(msg.defaultTag) || "default", target);
 
         // Re-send the canonical values back so the form reflects what was saved.
@@ -193,18 +195,24 @@ export class SettingsPanel {
 <body>
   <div class="wrap">
     <h1>Anamnesis Configuration</h1>
-    <div class="sub">Connection and authentication parameters for the Anamnesis Server. Changes apply immediately and refresh the Projects view.</div>
+    <div class="sub">Connection credentials from Anamnesis Settings → View Credentials in the web app. Changes apply immediately and refresh the Projects view.</div>
 
     <div class="field">
-      <label for="serverUrl">Server URL</label>
-      <input id="serverUrl" type="text" placeholder="http(s)://your-anamnesis-server:8765" />
-      <div class="hint">Base URL of the Anamnesis Server (no trailing slash). The MCP and HTTP API share this host.</div>
+      <label for="serverUrl">API Base URL</label>
+      <input id="serverUrl" type="text" placeholder="https://apigateway.anamnesis.cloud" />
+      <div class="hint">Defaults to production. Override for local development, e.g. <code>http://localhost:8080</code> (no trailing slash).</div>
     </div>
 
     <div class="field">
-      <label for="apiKey">API Key (Bearer token)</label>
-      <input id="apiKey" type="password" placeholder="optional — only if server was started with --api-key" />
-      <div class="hint">Optional. Sent as <code>Authorization: Bearer &lt;token&gt;</code> when the server requires an API key.</div>
+      <label for="clientId">Client Id</label>
+      <input id="clientId" type="text" placeholder="68ad9831c947b9d4008cff3c" />
+      <div class="hint">Your company id from Anamnesis Settings → View Credentials → Client Id.</div>
+    </div>
+
+    <div class="field">
+      <label for="secretKey">Secret Key</label>
+      <input id="secretKey" type="password" placeholder="paste secret key from View Credentials" />
+      <div class="hint">A named secret key generated in Anamnesis Settings → View Credentials.</div>
     </div>
 
     <div class="field">
@@ -234,7 +242,8 @@ export class SettingsPanel {
       const vscode = acquireVsCodeApi();
       const $ = (id) => document.getElementById(id);
       const serverUrl = $("serverUrl");
-      const apiKey = $("apiKey");
+      const clientId = $("clientId");
+      const secretKey = $("secretKey");
       const defaultTag = $("defaultTag");
       const testBtn = $("testBtn");
       const saveBtn = $("saveBtn");
@@ -259,7 +268,8 @@ export class SettingsPanel {
         vscode.postMessage({
           type: "test",
           serverUrl: serverUrl.value,
-          apiKey: apiKey.value,
+          clientId: clientId.value,
+          secretKey: secretKey.value,
         });
       });
 
@@ -270,7 +280,8 @@ export class SettingsPanel {
         vscode.postMessage({
           type: "save",
           serverUrl: serverUrl.value,
-          apiKey: apiKey.value,
+          clientId: clientId.value,
+          secretKey: secretKey.value,
           defaultTag: defaultTag.value,
           target: target.value,
         });
@@ -281,7 +292,8 @@ export class SettingsPanel {
         if (!msg) return;
         if (msg.type === "values") {
           serverUrl.value = msg.serverUrl || "";
-          apiKey.value = msg.apiKey || "";
+          clientId.value = msg.clientId || "";
+          secretKey.value = msg.secretKey || "";
           defaultTag.value = msg.defaultTag || "";
           // Hide workspace option if not available.
           const hasWs = (msg.targets || []).some((t) => t === 2 /* Workspace */);

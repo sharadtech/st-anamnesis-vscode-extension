@@ -2,7 +2,7 @@
   "name": "anamnesis",
   "displayName": "Anamnesis Cloud",
   "description": "Interactive Anamnesis knowledge graphs for AI-assisted coding.",
-  "version": "1.0.0",
+  "version": "1.4.4",
   "publisher": "sharadtech",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -32,7 +32,11 @@
     "Other"
   ],
   "activationEvents": [
-    "onView:anamnesis.projects"
+    "onView:anamnesis.projects",
+    "onView:anamnesis.projectPrompts",
+    "onCommand:anamnesis.createGraph",
+    "onCommand:anamnesis.viewGraph",
+    "onCommand:anamnesis.viewPrompts"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -50,6 +54,10 @@
         {
           "id": "anamnesis.projects",
           "name": "Projects"
+        },
+        {
+          "id": "anamnesis.projectPrompts",
+          "name": "Project Prompts"
         }
       ]
     },
@@ -75,6 +83,15 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "anamnesis.refreshPrompts",
+        "title": "Anamnesis: Refresh Project Prompts",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "anamnesis.openProjectPrompts",
+        "title": "Anamnesis: Open Project Prompts"
+      },
+      {
         "command": "anamnesis.deleteProject",
         "title": "Anamnesis: Delete Project Graph",
         "icon": "$(trash)"
@@ -83,6 +100,31 @@
         "command": "anamnesis.openSettings",
         "title": "Anamnesis: Open Settings",
         "icon": "$(settings-gear)"
+      },
+      {
+        "command": "anamnesis.createGraph",
+        "title": "Anamnesis: Create Knowledge Graph",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "anamnesis.viewGraph",
+        "title": "Anamnesis: View Knowledge Graph",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "anamnesis.viewPrompts",
+        "title": "Anamnesis: View Prompts",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "anamnesis.registerAiTools",
+        "title": "Anamnesis: Enable AI Tools (MCP + Skill)",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "anamnesis.unregisterAiTools",
+        "title": "Anamnesis: Remove AI Tools (MCP + Skill)",
+        "icon": "$(trash)"
       }
     ],
     "menus": {
@@ -101,30 +143,55 @@
           "command": "anamnesis.openSettings",
           "when": "view == anamnesis.projects",
           "group": "navigation"
+        },
+        {
+          "command": "anamnesis.registerAiTools",
+          "when": "view == anamnesis.projects",
+          "group": "1_config@1"
+        },
+        {
+          "command": "anamnesis.unregisterAiTools",
+          "when": "view == anamnesis.projects",
+          "group": "1_config@2"
+        },
+        {
+          "command": "anamnesis.refreshPrompts",
+          "when": "view == anamnesis.projectPrompts",
+          "group": "navigation"
         }
       ],
       "view/item/context": [
         {
           "command": "anamnesis.openGraphForTag",
-          "when": "view == anamnesis.projects && viewItem == project",
+          "when": "view == anamnesis.projects && (viewItem == ownedProject || viewItem == sharedProject)",
           "group": "inline@1"
         },
         {
           "command": "anamnesis.deleteProject",
-          "when": "view == anamnesis.projects && viewItem == project",
+          "when": "view == anamnesis.projects && viewItem == ownedProject",
           "group": "inline@2"
         },
         {
           "command": "anamnesis.deleteProject",
-          "when": "view == anamnesis.projects && viewItem == project",
+          "when": "view == anamnesis.projects && viewItem == ownedProject",
           "group": "1_modification@1"
         }
       ],
       "explorer/context": [
         {
-          "command": "anamnesis.openGraphForFile",
-          "when": "resourceScheme == file",
+          "command": "anamnesis.createGraph",
+          "when": "explorerResourceIsFolder",
+          "group": "navigation@99"
+        },
+        {
+          "command": "anamnesis.viewGraph",
+          "when": "explorerResourceIsFolder",
           "group": "navigation@100"
+        },
+        {
+          "command": "anamnesis.viewPrompts",
+          "when": "explorerResourceIsFolder",
+          "group": "navigation@101"
         }
       ]
     },
@@ -133,25 +200,43 @@
       "properties": {
         "anamnesis.serverUrl": {
           "type": "string",
-          "default": "",
-          "description": "Base URL of the Anamnesis Server (no trailing slash)."
+          "default": "https://apigateway.anamnesis.cloud",
+          "description": "API Base URL (no trailing slash). Defaults to production; override for local development, e.g. http://localhost:8080."
         },
-        "anamnesis.apiKey": {
+        "anamnesis.clientId": {
           "type": "string",
           "default": "",
-          "description": "Bearer token if the server was started with --api-key (optional)."
+          "description": "Client Id from Anamnesis Settings → View Credentials (your company id)."
+        },
+        "anamnesis.secretKey": {
+          "type": "string",
+          "default": "",
+          "description": "Secret Key from Anamnesis Settings → View Credentials."
         },
         "anamnesis.defaultTag": {
           "type": "string",
           "default": "default",
           "description": "Default graph tag to load when none is selected."
+        },
+        "anamnesis.excludeGlobs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Additional path prefixes to exclude when scanning a project for knowledge graph generation."
         }
       }
     }
   },
+  "dependencies": {
+    "graphology": "^0.26.0",
+    "graphology-communities-louvain": "^2.0.2",
+    "tree-sitter-wasms": "^0.1.11",
+    "web-tree-sitter": "^0.25.3"
+  },
   "scripts": {
     "build": "node esbuild.js",
     "package": "node esbuild.js --production && vsce package --no-yarn",
+    "publish:marketplace": "set -a && [ -f .env.local ] && . ./.env.local; set +a && npm run package && vsce publish --no-yarn",
     "watch": "node esbuild.js --watch",
     "install-cursor:mac": "npm run build && npm run package && cursor --uninstall-extension sharadtech.anamnesis 2>/dev/null || true && cursor --install-extension ./anamnesis-$(node -p \"require('./package.json').version\").vsix",
     "install-vscode:mac": "npm run build && npm run package && code --uninstall-extension sharadtech.anamnesis 2>/dev/null || true && code --install-extension ./anamnesis-$(node -p \"require('./package.json').version\").vsix"

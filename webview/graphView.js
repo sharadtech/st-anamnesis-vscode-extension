@@ -11,6 +11,8 @@
   let currentLayout = "cose"; // graph layout name
   let tableFilter = ""; // search filter for the table view
   let graphInited = false; // defer cytoscape init until graph view is chosen
+  let graphViewDisabled = false;
+  let graphViewNodeLimit = 1000;
 
   // ---- Loading overlay control ----
   // Shows a full-screen spinner over the graph area so the user sees clear
@@ -328,7 +330,11 @@
     const shown = filtered.slice(0, limit);
     let html = `<div class="table-info">Showing ${shown.length} of ${filtered.length} nodes` +
       (filtered.length > limit ? ` (first ${limit}, filter to narrow)` : "") +
-      ` &middot; ${edges.length} edges</div>`;
+      ` &middot; ${edges.length} edges`;
+    if (graphViewDisabled) {
+      html += ` &middot; Graph view disabled (&gt; ${graphViewNodeLimit} nodes)`;
+    }
+    html += `</div>`;
     html += '<table class="nodes-table"><thead><tr>' +
       "<th>Label</th><th>Kind</th><th>Community</th><th>Source file</th><th>LOC</th>" +
       "</tr></thead><tbody>";
@@ -357,6 +363,9 @@
 
   // ---- View switching ----
   async function switchView(view) {
+    if (view === "graph" && graphViewDisabled) {
+      return;
+    }
     currentView = view;
     const tableEl = document.getElementById("table-view");
     const graphEl = document.getElementById("graph-view");
@@ -505,6 +514,22 @@
     return String(s).replace(/[^a-zA-Z0-9_-]/g, (m) => "\\" + m);
   }
 
+  function setGraphViewEnabled(enabled, nodeCount) {
+    graphViewDisabled = !enabled;
+    const graphBtn = document.getElementById("viewGraphBtn");
+    if (enabled) {
+      graphBtn.disabled = false;
+      graphBtn.title = "Graph view (Cytoscape)";
+    } else {
+      graphBtn.disabled = true;
+      graphBtn.title =
+        `Graph view disabled (${nodeCount} nodes; limit is ${graphViewNodeLimit} for IDE performance)`;
+      if (currentView === "graph") {
+        switchView("table");
+      }
+    }
+  }
+
   // ---- Wire up UI ----
   document.getElementById("refreshBtn").addEventListener("click", () => {
     vscode.postMessage({ type: "refresh" });
@@ -513,7 +538,11 @@
     if (cy) cy.animate({ fit: { eles: cy.elements(), padding: 20 } }, { duration: 200 });
   });
   document.getElementById("viewTableBtn").addEventListener("click", () => switchView("table"));
-  document.getElementById("viewGraphBtn").addEventListener("click", () => switchView("graph"));
+  document.getElementById("viewGraphBtn").addEventListener("click", () => {
+    if (!graphViewDisabled) {
+      switchView("graph");
+    }
+  });
   const layoutSelect = document.getElementById("layoutSelect");
   layoutSelect.addEventListener("change", (e) => {
     currentLayout = e.target.value;
@@ -546,6 +575,7 @@
       document.getElementById("stats").textContent = `Loading graph for ${msg.tag}...`;
       document.getElementById("table-container").innerHTML =
         '<div class="muted">Loading...</div>';
+      document.getElementById("viewGraphBtn").disabled = true;
       clearInspector();
       // Keep any graph-render loader hidden during data fetch; it's for Cytoscape work only.
       hideLoader();
@@ -554,8 +584,20 @@
       lastGraph = msg.graph;
       lastStats = msg.stats;
       graphInited = false; // reset so graph view rebuilds with new data
+      if (typeof msg.graphViewNodeLimit === "number") {
+        graphViewNodeLimit = msg.graphViewNodeLimit;
+      }
+      const nodeCount =
+        msg.nodeCount !== undefined
+          ? msg.nodeCount
+          : msg.stats && msg.stats.nodes !== undefined
+            ? msg.stats.nodes
+            : (msg.graph.nodes || []).length;
+      const disableGraph =
+        msg.graphViewDisabled === true || nodeCount > graphViewNodeLimit;
+      setGraphViewEnabled(!disableGraph, nodeCount);
       updateStats(msg.stats, msg.graph);
-      // Always render table first (instant), regardless of prior view.
+      // Large graphs stay in table view only; smaller graphs also open in table first.
       hideLoader();
       stopLoaderTimer();
       switchView("table");

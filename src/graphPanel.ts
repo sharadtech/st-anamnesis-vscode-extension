@@ -1,6 +1,9 @@
 import * as vscode from "vscode";
 import { fetchGraph, fetchStats, type GraphData, type GraphStats } from "./api";
 
+/** Graphs above this node count open in table view only; Graph button is disabled. */
+export const GRAPH_VIEW_NODE_LIMIT = 1000;
+
 export class GraphPanel {
   public static current: GraphPanel | undefined;
   private readonly _panel: vscode.WebviewPanel;
@@ -70,6 +73,10 @@ export class GraphPanel {
         graph,
         stats,
         highlight: this._highlight,
+        graphViewDisabled:
+          (stats?.nodes ?? graph.nodes.length) > GRAPH_VIEW_NODE_LIMIT,
+        nodeCount: stats?.nodes ?? graph.nodes.length,
+        graphViewNodeLimit: GRAPH_VIEW_NODE_LIMIT,
       });
     } catch (err) {
       this._panel.webview.postMessage({
@@ -119,6 +126,8 @@ export class GraphPanel {
       }
     } else if (msg.type === "search" && msg.query !== undefined) {
       // Search is done in-webview from the already-loaded graph; no host call needed.
+    } else if (msg.type === "refresh") {
+      await this._load();
     }
   }
 
@@ -224,6 +233,10 @@ export class GraphPanel {
     .seg-group button.active {
       background: var(--vscode-button-background, #0a6f0a);
       color: var(--vscode-button-foreground, #fff);
+    }
+    .seg-group button:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
     }
     #layout-wrap { display: none; align-items: center; gap: 4px; }
     #layoutSelect { padding: 2px 4px; font-size: 11px;
