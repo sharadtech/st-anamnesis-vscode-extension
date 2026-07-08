@@ -240,6 +240,7 @@ import json
 import os
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 owner = os.environ["GITHUB_OWNER"]
@@ -267,6 +268,8 @@ def request(method, url, data=None, extra_headers=None):
         req_headers.update(extra_headers)
     if data is not None:
         body = json.dumps(data).encode("utf-8")
+    elif method in ("POST", "PUT", "PATCH") and "Content-Type" in req_headers:
+        del req_headers["Content-Type"]
     req = urllib.request.Request(url, data=body, headers=req_headers, method=method)
     try:
         with urllib.request.urlopen(req) as resp:
@@ -280,6 +283,26 @@ def request(method, url, data=None, extra_headers=None):
             payload = {"message": raw}
         payload["http_status"] = exc.code
         return payload
+
+def asset_upload_url(release_obj, filename):
+    template = release_obj.get("upload_url", "")
+    if template:
+        base = template.split("{", 1)[0]
+        return f"{base}?name={urllib.parse.quote(filename)}"
+    release_id = release_obj["id"]
+    return (
+        f"https://uploads.github.com/repos/{owner}/{repo}/releases/"
+        f"{release_id}/assets?name={urllib.parse.quote(filename)}"
+    )
+
+def delete_existing_asset(asset_name):
+    for existing in release.get("assets", []):
+        if existing.get("name") == asset_name:
+            asset_id = existing["id"]
+            print(f"Removing existing release asset {asset_name} (id={asset_id}) ...")
+            result = request("DELETE", f"{api}/releases/assets/{asset_id}", data=None)
+            if result.get("http_status") and result["http_status"] >= 400:
+                print(f"Warning: could not delete existing asset {asset_name}: {result}")
 
 print(f"Creating or locating GitHub release {tag} ...")
 create_payload = {
@@ -313,6 +336,7 @@ for file_path in assets:
         print(f"Missing asset file: {file_path}", file=sys.stderr)
         sys.exit(1)
     name = os.path.basename(file_path)
+    delete_existing_asset(name)
     print(f"Uploading {file_path} as {name} ...")
     with open(file_path, "rb") as fh:
         file_data = fh.read()
@@ -322,7 +346,7 @@ for file_path in assets:
         "Content-Type": "application/octet-stream",
         "User-Agent": "jenkins-anamnesis-build",
     }
-    upload_url = f"{api}/releases/{release_id}/assets?name={name}"
+    upload_url = asset_upload_url(release, name)
     req = urllib.request.Request(upload_url, data=file_data, headers=upload_headers, method="POST")
     try:
         with urllib.request.urlopen(req) as resp:
