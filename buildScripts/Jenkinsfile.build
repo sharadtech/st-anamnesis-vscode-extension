@@ -300,14 +300,40 @@ logo.png
                 withCredentials([string(credentialsId: env.OPENVSX_TOKEN_CREDENTIALS_ID, variable: 'OPENVSX_PAT')]) {
                     sh '''
                         set -eu
+                        # Jenkins Secret text often adds a trailing newline when the token is pasted.
+                        OVSX_PAT="$(printf '%s' "${OPENVSX_PAT}" | sed 's/[[:space:]]*$//')"
+                        export OVSX_PAT
+
+                        echo "Verifying Open VSX token for publisher ${EXTENSION_PUBLISHER} ..."
+                        if ! npx ovsx verify-pat "${EXTENSION_PUBLISHER}" --pat "${OVSX_PAT}"; then
+                            echo ""
+                            echo "Open VSX token verification failed."
+                            echo "Check Jenkins credential '${OPENVSX_TOKEN_CREDENTIALS_ID}':"
+                            echo "  - Must be an Open VSX token from https://open-vsx.org/user-settings/tokens"
+                            echo "  - Must NOT be the VS Code Marketplace PAT (vsce-sharadtech-pat)"
+                            echo "  - Re-paste the token with no trailing spaces or newlines"
+                            echo "  - Ensure the Eclipse Publisher Agreement is signed at https://open-vsx.org"
+                            exit 1
+                        fi
+
                         MAX_ATTEMPTS=5
                         ATTEMPT=1
                         while [ "${ATTEMPT}" -le "${MAX_ATTEMPTS}" ]; do
                             echo "Open VSX publish attempt ${ATTEMPT}/${MAX_ATTEMPTS} ..."
-                            if npx ovsx publish "${VSIX_FILE}" -p "${OPENVSX_PAT}"; then
+                            PUBLISH_OUTPUT="$(npx ovsx publish "${VSIX_FILE}" --pat "${OVSX_PAT}" 2>&1)" || PUBLISH_STATUS=$?
+                            PUBLISH_STATUS=${PUBLISH_STATUS:-0}
+                            printf '%s\n' "${PUBLISH_OUTPUT}"
+
+                            if [ "${PUBLISH_STATUS}" -eq 0 ]; then
                                 echo "Open VSX publish succeeded on attempt ${ATTEMPT}."
                                 exit 0
                             fi
+
+                            if printf '%s' "${PUBLISH_OUTPUT}" | grep -qi 'invalid access token'; then
+                                echo "Open VSX publish aborted — token is invalid (retrying will not help)."
+                                exit 1
+                            fi
+
                             if [ "${ATTEMPT}" -eq "${MAX_ATTEMPTS}" ]; then
                                 echo "Open VSX publish failed after ${MAX_ATTEMPTS} attempts."
                                 exit 1
