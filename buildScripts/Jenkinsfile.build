@@ -3,41 +3,37 @@
 // -----------------------------------------------------------------------------
 //  Two modes controlled by the RELEASE_PROCESS checkbox parameter:
 //
-//  SNAPSHOT build only (RELEASE_PROCESS = false, default):
+//  Build only (RELEASE_PROCESS = false, default):
 //    1. Wipe + Checkout
 //    2. Setup Node
-//    3. SNAPSHOT build (sanity check)
+//    3. Build extension from current package.json
 //    4. Verify dist artifacts
 //    5. Finish
 //
-//  Full release flow (RELEASE_PROCESS = true):
+//  Release flow (RELEASE_PROCESS = true):
 //    1. Wipe + Checkout
-//    2. SNAPSHOT build (sanity)
+//    2. Build extension (sanity check)
 //    3. Verify dist artifacts
-//    4. Strip "-SNAPSHOT" from package.json -> RELEASE version
+//    4. Set package.json to RELEASE_VERSION (job parameter — independent of repo version)
 //    5. Re-build + package RELEASE VSIX
 //    6. Publish to selected marketplaces (checkbox parameters):
 //         - PUBLISH_VSCODE_MARKETPLACE  (publisher: sharadtech)
 //         - PUBLISH_OPEN_VSX            (namespace: sharadtech)
-//    7. Bump package.json to NEXT_DEV_VERSION (job parameter), commit + push
-//    8. Build the next SNAPSHOT
-//    9. Finish
+//    7. Finish
+//
+//  package.json version in the repo is not modified or pushed by this pipeline.
 //
 //  Prerequisites (one-time, outside Jenkins):
-//    - package.json version must end with "-SNAPSHOT" before each release run
-//      e.g. "1.4.5-SNAPSHOT" -> releases as "1.4.5"
 //    - Open VSX namespace created:
 //        npx ovsx create-namespace sharadtech -p <OPENVSX_TOKEN>
 //    - Eclipse Publisher Agreement signed at https://open-vsx.org
 //
 //  Required Jenkins credentials (Secret text):
-//    - GIT-ssh-sharadtech        : SSH private key with push access to repo
 //    - vsce-sharadtech-pat       : Azure DevOps PAT — Marketplace → Manage
 //    - openvsx-sharadtech-token  : Open VSX access token
 //
 //  Required Jenkins plugins:
 //    - Pipeline Utility Steps  (readJSON / writeJSON)
-//    - SSH Agent
 //    - Credentials Binding
 //    - Timestamper, AnsiColor (optional, used in options)
 // =============================================================================
@@ -49,7 +45,12 @@ pipeline {
         booleanParam(
             name: 'RELEASE_PROCESS',
             defaultValue: false,
-            description: 'When enabled, performs the full release flow: package the release VSIX, publish to selected marketplaces, bump package.json to NEXT_DEV_VERSION, and push to git. When disabled, only builds the current SNAPSHOT to verify there are no issues.'
+            description: 'When enabled, packages and publishes the RELEASE_VERSION to selected marketplaces. When disabled, only builds the extension from the current package.json to verify there are no issues.'
+        )
+        string(
+            name: 'RELEASE_VERSION',
+            defaultValue: '1.4.5',
+            description: 'Semver version to publish (e.g. 1.4.5). Used only when RELEASE_PROCESS is enabled. Independent of the version in package.json.'
         )
         booleanParam(
             name: 'PUBLISH_VSCODE_MARKETPLACE',
@@ -61,11 +62,6 @@ pipeline {
             defaultValue: true,
             description: 'Publish the release VSIX to Open VSX (open-vsx.org). Only used when RELEASE_PROCESS is enabled.'
         )
-        string(
-            name: 'NEXT_DEV_VERSION',
-            defaultValue: '1.4.5-SNAPSHOT',
-            description: 'Next development version to set in package.json AFTER the release is published. Must end with "-SNAPSHOT". Only used when RELEASE_PROCESS is enabled.'
-        )
     }
 
     options {
@@ -75,12 +71,6 @@ pipeline {
     }
 
     environment {
-        // ---- Source control ----
-        GIT_BRANCH                 = 'main'
-        GIT_CREDENTIALS_ID         = 'GIT-ssh-sharadtech'
-        GIT_USER_NAME              = 'Jenkins CI'
-        GIT_USER_EMAIL             = 'ci@sharadtech.local'
-
         // ---- Extension identity ----
         EXTENSION_PUBLISHER        = 'sharadtech'
         EXTENSION_NAME             = 'anamnesis'
@@ -139,21 +129,17 @@ pipeline {
         }
 
         // ---------------------------------------------------------------------
-        stage('Build SNAPSHOT') {
+        stage('Build') {
             steps {
                 script {
                     def pkg = readJSON file: 'package.json'
                     def currentVersion = pkg.version
-                    echo "Building SNAPSHOT version: ${currentVersion}"
-                    env.SNAPSHOT_VERSION = currentVersion
-
-                    if (!currentVersion?.endsWith('-SNAPSHOT')) {
-                        error "Expected package.json version to end with '-SNAPSHOT' but found '${currentVersion}'."
-                    }
+                    echo "package.json version: ${currentVersion}"
+                    env.BUILD_VERSION = currentVersion
 
                     def buildLabel = params.RELEASE_PROCESS
-                        ? "#${env.BUILD_NUMBER} • release → ${currentVersion.replace('-SNAPSHOT', '')}"
-                        : "#${env.BUILD_NUMBER} • SNAPSHOT ${currentVersion}"
+                        ? "#${env.BUILD_NUMBER} • release ${params.RELEASE_VERSION}"
+                        : "#${env.BUILD_NUMBER} • build ${currentVersion}"
                     currentBuild.displayName = buildLabel
                 }
 
@@ -186,9 +172,17 @@ pipeline {
             }
             steps {
                 script {
+                    def releaseVersion = params.RELEASE_VERSION?.trim()
+                    if (!releaseVersion) {
+                        error "RELEASE_VERSION job parameter is required when RELEASE_PROCESS is enabled."
+                    }
+                    if (!(releaseVersion ==~ /^\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$/)) {
+                        error "RELEASE_VERSION '${releaseVersion}' is not a valid semver (expected e.g. 1.4.5)."
+                    }
+
                     def pkg = readJSON file: 'package.json'
-                    def currentVersion = pkg.version
-                    echo "Current package.json version: ${currentVersion}"
+                    echo "package.json version (unchanged in git): ${pkg.version}"
+                    echo "Publishing as RELEASE_VERSION: ${releaseVersion}"
 
                     if (!params.PUBLISH_VSCODE_MARKETPLACE && !params.PUBLISH_OPEN_VSX) {
                         echo "WARNING: No marketplace selected — release package will be created but not published."
@@ -199,13 +193,12 @@ pipeline {
                         echo "Publish targets: ${targets.join(', ')}"
                     }
 
-                    def releaseVersion = currentVersion.replace('-SNAPSHOT', '')
                     env.RELEASE_VERSION = releaseVersion
                     env.VSIX_FILE = "${env.EXTENSION_NAME}-${releaseVersion}.vsix"
                     currentBuild.displayName = "#${env.BUILD_NUMBER} • ${releaseVersion}"
 
                     sh "npm version ${releaseVersion} --no-git-tag-version --allow-same-version"
-                    echo "package.json version set to RELEASE: ${releaseVersion}"
+                    echo "package.json version set locally for packaging: ${releaseVersion}"
                 }
             }
         }
@@ -217,9 +210,25 @@ pipeline {
             }
             steps {
                 script {
-                    if (!fileExists('.vscodeignore')) {
-                        error "Missing .vscodeignore — VSIX would bundle Jenkins dev artifacts (.tools/, node_modules/, etc.). Commit .vscodeignore to the repository."
-                    }
+                    writeFile file: '.vscodeignore', text: '''.git/**
+.tools/**
+node_modules/**
+src/**
+package-lock.json
+tsconfig.json
+esbuild.js
+.vscode/**
+.vscodeignore
+*.vsix
+.gitignore
+.env
+.env.*
+buildScripts/**
+exImages/**
+logo.svg
+logo.png
+'''
+                    echo 'Wrote .vscodeignore for VSIX packaging (excludes .tools/, node_modules/, src/, etc.)'
                 }
 
                 sh '''
@@ -314,61 +323,6 @@ pipeline {
         }
 
         // ---------------------------------------------------------------------
-        stage('Bump up the version') {
-            when {
-                expression { params.RELEASE_PROCESS }
-            }
-            steps {
-                script {
-                    if (!params.NEXT_DEV_VERSION?.trim()) {
-                        error "NEXT_DEV_VERSION job parameter is required when RELEASE_PROCESS is enabled."
-                    }
-                    if (!params.NEXT_DEV_VERSION.endsWith('-SNAPSHOT')) {
-                        error "NEXT_DEV_VERSION '${params.NEXT_DEV_VERSION}' must end with '-SNAPSHOT'."
-                    }
-                }
-
-                sh """
-                    set -eu
-                    npm version ${params.NEXT_DEV_VERSION} --no-git-tag-version --allow-same-version
-                """
-
-                sshagent(credentials: [env.GIT_CREDENTIALS_ID]) {
-                    sh """
-                        set -eu
-                        git config user.name  "${env.GIT_USER_NAME}"
-                        git config user.email "${env.GIT_USER_EMAIL}"
-
-                        git add package.json
-                        if [ -f package-lock.json ]; then git add package-lock.json; fi
-
-                        if git diff --cached --quiet; then
-                            echo "No version changes to commit."
-                        else
-                            git commit -m "ci: bump version to ${params.NEXT_DEV_VERSION} [skip ci]"
-                            git push origin HEAD:${env.GIT_BRANCH}
-                        fi
-                    """
-                }
-            }
-        }
-
-        // ---------------------------------------------------------------------
-        stage('Build Next SNAPSHOT') {
-            when {
-                expression { params.RELEASE_PROCESS }
-            }
-            steps {
-                sh '''
-                    set -eu
-                    rm -rf dist
-                    npm run build
-                    ls -la dist
-                '''
-            }
-        }
-
-        // ---------------------------------------------------------------------
         stage('Finish') {
             steps {
                 script {
@@ -388,12 +342,11 @@ pipeline {
                         if (params.PUBLISH_OPEN_VSX) {
                             echo "   Open VSX         : ${env.OPENVSX_REGISTRY}/extension/${env.EXTENSION_PUBLISHER}/${env.EXTENSION_NAME}"
                         }
-                        echo "   Next dev version : ${params.NEXT_DEV_VERSION}"
                         echo "==============================================================="
                     } else {
                         echo "==============================================================="
-                        echo " SNAPSHOT build completed successfully."
-                        echo "   SNAPSHOT version : ${env.SNAPSHOT_VERSION}"
+                        echo " Build completed successfully."
+                        echo "   package.json     : ${env.BUILD_VERSION}"
                         echo "   Extension ID     : ${env.EXTENSION_ID}"
                         echo "   Release skipped  : RELEASE_PROCESS was not enabled"
                         echo "==============================================================="
@@ -413,7 +366,7 @@ pipeline {
                     def publishSummary = publishedTo ? "published to ${publishedTo.join(' + ')}" : 'packaged only (no marketplace publish)'
                     echo "SUCCESS: Released ${env.EXTENSION_ID}@${env.RELEASE_VERSION} — ${publishSummary}"
                 } else {
-                    echo "SUCCESS: SNAPSHOT build passed for ${env.EXTENSION_ID}@${env.SNAPSHOT_VERSION}"
+                    echo "SUCCESS: Build passed for ${env.EXTENSION_ID}@${env.BUILD_VERSION}"
                 }
             }
         }
