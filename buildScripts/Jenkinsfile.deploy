@@ -5,12 +5,12 @@
 //
 //  Flow:
 //    1. Validate parameters
-//    2. Setup Node
-//    3. Download the VERSION release artifact from GitHub Releases
-//       (uploaded by the Build & Release job)
-//    4. Publish to VS Code Marketplace (if PUBLISH_TO_VSCODE_MARKETPLACE)
-//    5. Publish to Open VSX (if PUBLISH_TO_OPENVS_MARKETPLACE)
-//    6. Finish
+//    2. Resolve VERSION (LATEST = newest GitHub release; otherwise use specific version)
+//    3. Setup Node
+//    4. Download the release artifact from GitHub Releases
+//    5. Publish to VS Code Marketplace (if PUBLISH_TO_VSCODE_MARKETPLACE)
+//    6. Publish to Open VSX (if PUBLISH_TO_OPENVS_MARKETPLACE)
+//    7. Finish
 //
 //  GitHub release assets (from Build job):
 //    - anamnesis-<version>.vsix
@@ -32,8 +32,8 @@ pipeline {
     parameters {
         string(
             name: 'VERSION',
-            defaultValue: '1.4.5',
-            description: 'Release version to deploy (e.g. 1.4.5). Must match a GitHub release tag v<version> created by the Build & Release job.'
+            defaultValue: 'LATEST',
+            description: 'Set to LATEST to deploy the newest GitHub release, or enter a specific version (e.g. 1.4.5) to deploy that release tag.'
         )
         booleanParam(
             name: 'PUBLISH_TO_VSCODE_MARKETPLACE',
@@ -78,15 +78,96 @@ pipeline {
             steps {
                 deleteDir()
                 script {
-                    def version = params.VERSION?.trim()
-                    if (!version) {
-                        error 'VERSION parameter is required.'
-                    }
-                    if (!(version ==~ /^\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$/)) {
-                        error "VERSION '${version}' is not a valid semver (expected e.g. 1.4.5)."
-                    }
                     if (!params.PUBLISH_TO_VSCODE_MARKETPLACE && !params.PUBLISH_TO_OPENVS_MARKETPLACE) {
                         error 'Select at least one marketplace to publish to.'
+                    }
+
+                    def targets = []
+                    if (params.PUBLISH_TO_VSCODE_MARKETPLACE) targets << 'VS Code Marketplace'
+                    if (params.PUBLISH_TO_OPENVS_MARKETPLACE) targets << 'Open VSX'
+                    env.DEPLOY_TARGETS = targets.join(' + ')
+                }
+            }
+        }
+
+        stage('Resolve Version') {
+            steps {
+                script {
+                    def versionInput = params.VERSION?.trim()
+                    def version
+
+                    if (!versionInput || versionInput.equalsIgnoreCase('LATEST')) {
+                        echo 'VERSION is LATEST — resolving newest GitHub release ...'
+                        withCredentials([string(credentialsId: env.GITHUB_TOKEN_CREDENTIALS_ID, variable: 'GITHUB_TOKEN')]) {
+                            version = sh(
+                                script: '''
+                                    set -eu
+                                    GITHUB_TOKEN="$(printf '%s' "${GITHUB_TOKEN}" | sed 's/[[:space:]]*$//')"
+                                    export GITHUB_TOKEN
+                                    python3 - <<'PY'
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+owner = os.environ["GITHUB_OWNER"]
+repo = os.environ["GITHUB_REPO"]
+token = os.environ["GITHUB_TOKEN"]
+extension = os.environ["EXTENSION_NAME"]
+api = f"https://api.github.com/repos/{owner}/{repo}"
+headers = {
+    "Authorization": f"Bearer {token}",
+    "Accept": "application/vnd.github+json",
+    "User-Agent": "jenkins-anamnesis-deploy",
+}
+
+def get_json(url):
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    with urllib.request.urlopen(req) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+def tag_to_version(tag_name):
+    return tag_name[1:] if tag_name.startswith("v") else tag_name
+
+def has_release_assets(release):
+    assets = release.get("assets") or []
+    if not assets:
+        return False
+    expected = f"{extension}-"
+    return any(a.get("name", "").startswith(expected) and a.get("name", "").endswith(".vsix") for a in assets)
+
+try:
+    latest = get_json(f"{api}/releases/latest")
+    if latest.get("tag_name") and has_release_assets(latest):
+        print(tag_to_version(latest["tag_name"]))
+        sys.exit(0)
+except urllib.error.HTTPError:
+    pass
+
+releases = get_json(f"{api}/releases?per_page=20")
+for release in releases:
+    tag_name = release.get("tag_name", "")
+    if release.get("draft"):
+        continue
+    if not tag_name or not has_release_assets(release):
+        continue
+    print(tag_to_version(tag_name))
+    sys.exit(0)
+
+sys.exit("No GitHub release with VSIX assets found. Run the Build & Release job first.")
+PY
+                                ''',
+                                returnStdout: true
+                            ).trim()
+                        }
+                        echo "Resolved latest GitHub release version: ${version}"
+                    } else {
+                        version = versionInput
+                        if (!(version ==~ /^\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$/)) {
+                            error "VERSION '${version}' is not valid. Use LATEST or a semver such as 1.4.5."
+                        }
+                        echo "Using specific VERSION from job parameter: ${version}"
                     }
 
                     env.DEPLOY_VERSION      = version
@@ -94,11 +175,7 @@ pipeline {
                     env.VSIX_FILE           = "${env.EXTENSION_NAME}-${version}.vsix"
                     env.VSIX_VSCODE_FILE    = "${env.EXTENSION_NAME}-${version}-vscode-marketplace.vsix"
                     env.VSIX_OPENVSX_FILE   = "${env.EXTENSION_NAME}-${version}-open-vsx.vsix"
-
-                    def targets = []
-                    if (params.PUBLISH_TO_VSCODE_MARKETPLACE) targets << 'VS Code Marketplace'
-                    if (params.PUBLISH_TO_OPENVS_MARKETPLACE) targets << 'Open VSX'
-                    currentBuild.displayName = "#${env.BUILD_NUMBER} • ${version} → ${targets.join(' + ')}"
+                    currentBuild.displayName = "#${env.BUILD_NUMBER} • ${version} → ${env.DEPLOY_TARGETS}"
                 }
             }
         }
