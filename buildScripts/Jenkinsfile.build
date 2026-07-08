@@ -1,7 +1,16 @@
 // =============================================================================
 //  Anamnesis VS Code Extension — BUILD & RELEASE Jenkinsfile
 // -----------------------------------------------------------------------------
-//  Pipeline performs the full release flow:
+//  Two modes controlled by the RELEASE_PROCESS checkbox parameter:
+//
+//  SNAPSHOT build only (RELEASE_PROCESS = false, default):
+//    1. Wipe + Checkout
+//    2. Setup Node
+//    3. SNAPSHOT build (sanity check)
+//    4. Verify dist artifacts
+//    5. Finish
+//
+//  Full release flow (RELEASE_PROCESS = true):
 //    1. Wipe + Checkout
 //    2. SNAPSHOT build (sanity)
 //    3. Verify dist artifacts
@@ -36,10 +45,15 @@ pipeline {
     agent any
 
     parameters {
+        booleanParam(
+            name: 'RELEASE_PROCESS',
+            defaultValue: false,
+            description: 'When enabled, performs the full release flow: publish to VS Code Marketplace and Open VSX, bump package.json to NEXT_DEV_VERSION, and push to git. When disabled, only builds the current SNAPSHOT to verify there are no issues.'
+        )
         string(
             name: 'NEXT_DEV_VERSION',
             defaultValue: '1.4.5-SNAPSHOT',
-            description: 'Next development version to set in package.json AFTER the release is published. Must end with "-SNAPSHOT".'
+            description: 'Next development version to set in package.json AFTER the release is published. Must end with "-SNAPSHOT". Only used when RELEASE_PROCESS is enabled.'
         )
     }
 
@@ -114,8 +128,24 @@ pipeline {
         }
 
         // ---------------------------------------------------------------------
-        stage('Build') {
+        stage('Build SNAPSHOT') {
             steps {
+                script {
+                    def pkg = readJSON file: 'package.json'
+                    def currentVersion = pkg.version
+                    echo "Building SNAPSHOT version: ${currentVersion}"
+                    env.SNAPSHOT_VERSION = currentVersion
+
+                    if (!currentVersion?.endsWith('-SNAPSHOT')) {
+                        error "Expected package.json version to end with '-SNAPSHOT' but found '${currentVersion}'."
+                    }
+
+                    def buildLabel = params.RELEASE_PROCESS
+                        ? "#${env.BUILD_NUMBER} • release → ${currentVersion.replace('-SNAPSHOT', '')}"
+                        : "#${env.BUILD_NUMBER} • SNAPSHOT ${currentVersion}"
+                    currentBuild.displayName = buildLabel
+                }
+
                 sh '''
                     set -eu
                     echo "Node : $(node --version)"
@@ -140,15 +170,14 @@ pipeline {
 
         // ---------------------------------------------------------------------
         stage('Set Release Version') {
+            when {
+                expression { params.RELEASE_PROCESS }
+            }
             steps {
                 script {
                     def pkg = readJSON file: 'package.json'
                     def currentVersion = pkg.version
                     echo "Current package.json version: ${currentVersion}"
-
-                    if (!currentVersion?.endsWith('-SNAPSHOT')) {
-                        error "Expected current package.json version to end with '-SNAPSHOT' but found '${currentVersion}'."
-                    }
 
                     def releaseVersion = currentVersion.replace('-SNAPSHOT', '')
                     env.RELEASE_VERSION = releaseVersion
@@ -163,6 +192,9 @@ pipeline {
 
         // ---------------------------------------------------------------------
         stage('Create Release Package') {
+            when {
+                expression { params.RELEASE_PROCESS }
+            }
             steps {
                 sh '''
                     set -eu
@@ -193,6 +225,9 @@ pipeline {
 
         // ---------------------------------------------------------------------
         stage('Publish VS Code Marketplace') {
+            when {
+                expression { params.RELEASE_PROCESS }
+            }
             steps {
                 withCredentials([string(credentialsId: env.VSCE_PAT_CREDENTIALS_ID, variable: 'VSCE_PAT')]) {
                     sh '''
@@ -207,6 +242,9 @@ pipeline {
 
         // ---------------------------------------------------------------------
         stage('Publish Open VSX') {
+            when {
+                expression { params.RELEASE_PROCESS }
+            }
             steps {
                 withCredentials([string(credentialsId: env.OPENVSX_TOKEN_CREDENTIALS_ID, variable: 'OPENVSX_PAT')]) {
                     sh '''
@@ -219,10 +257,13 @@ pipeline {
 
         // ---------------------------------------------------------------------
         stage('Bump up the version') {
+            when {
+                expression { params.RELEASE_PROCESS }
+            }
             steps {
                 script {
                     if (!params.NEXT_DEV_VERSION?.trim()) {
-                        error "NEXT_DEV_VERSION job parameter is required."
+                        error "NEXT_DEV_VERSION job parameter is required when RELEASE_PROCESS is enabled."
                     }
                     if (!params.NEXT_DEV_VERSION.endsWith('-SNAPSHOT')) {
                         error "NEXT_DEV_VERSION '${params.NEXT_DEV_VERSION}' must end with '-SNAPSHOT'."
@@ -256,6 +297,9 @@ pipeline {
 
         // ---------------------------------------------------------------------
         stage('Build Next SNAPSHOT') {
+            when {
+                expression { params.RELEASE_PROCESS }
+            }
             steps {
                 sh '''
                     set -eu
@@ -269,21 +313,38 @@ pipeline {
         // ---------------------------------------------------------------------
         stage('Finish') {
             steps {
-                echo "==============================================================="
-                echo " Build job completed successfully."
-                echo "   Released version : ${env.RELEASE_VERSION}"
-                echo "   Extension ID     : ${env.EXTENSION_ID}"
-                echo "   VS Code Market   : https://marketplace.visualstudio.com/items?itemName=${env.EXTENSION_ID}"
-                echo "   Open VSX         : ${env.OPENVSX_REGISTRY}/extension/${env.EXTENSION_PUBLISHER}/${env.EXTENSION_NAME}"
-                echo "   Next dev version : ${params.NEXT_DEV_VERSION}"
-                echo "==============================================================="
+                script {
+                    if (params.RELEASE_PROCESS) {
+                        echo "==============================================================="
+                        echo " Release job completed successfully."
+                        echo "   Released version : ${env.RELEASE_VERSION}"
+                        echo "   Extension ID     : ${env.EXTENSION_ID}"
+                        echo "   VS Code Market   : https://marketplace.visualstudio.com/items?itemName=${env.EXTENSION_ID}"
+                        echo "   Open VSX         : ${env.OPENVSX_REGISTRY}/extension/${env.EXTENSION_PUBLISHER}/${env.EXTENSION_NAME}"
+                        echo "   Next dev version : ${params.NEXT_DEV_VERSION}"
+                        echo "==============================================================="
+                    } else {
+                        echo "==============================================================="
+                        echo " SNAPSHOT build completed successfully."
+                        echo "   SNAPSHOT version : ${env.SNAPSHOT_VERSION}"
+                        echo "   Extension ID     : ${env.EXTENSION_ID}"
+                        echo "   Release skipped  : RELEASE_PROCESS was not enabled"
+                        echo "==============================================================="
+                    }
+                }
             }
         }
     }
 
     post {
         success {
-            echo "SUCCESS: Released ${env.EXTENSION_ID}@${env.RELEASE_VERSION}"
+            script {
+                if (params.RELEASE_PROCESS) {
+                    echo "SUCCESS: Released ${env.EXTENSION_ID}@${env.RELEASE_VERSION}"
+                } else {
+                    echo "SUCCESS: SNAPSHOT build passed for ${env.EXTENSION_ID}@${env.SNAPSHOT_VERSION}"
+                }
+            }
         }
         failure {
             echo "FAILURE: Build job failed at stage '${env.STAGE_NAME}'."
