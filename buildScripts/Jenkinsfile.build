@@ -235,53 +235,106 @@ logo.png
                         GITHUB_TOKEN="$(printf '%s' "${GITHUB_TOKEN}" | sed 's/[[:space:]]*$//')"
                         export GITHUB_TOKEN
 
-                        API="https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}"
-                        TAG="${GIT_TAG}"
-                        RELEASE_NAME="${RELEASE_VERSION}"
+                        python3 - <<'PY'
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
 
-                        echo "Creating or locating GitHub release ${TAG} ..."
-                        RELEASE_JSON=$(curl -sS -X POST \
-                            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-                            -H "Accept: application/vnd.github+json" \
-                            "${API}/releases" \
-                            -d "{\"tag_name\":\"${TAG}\",\"name\":\"${RELEASE_NAME}\",\"body\":\"Anamnesis VS Code Extension ${RELEASE_VERSION}\",\"draft\":false,\"prerelease\":false,\"generate_release_notes\":true}")
+owner = os.environ["GITHUB_OWNER"]
+repo = os.environ["GITHUB_REPO"]
+token = os.environ["GITHUB_TOKEN"]
+tag = os.environ["GIT_TAG"]
+version = os.environ["RELEASE_VERSION"]
+assets = [
+    os.environ["VSIX_FILE"],
+    os.environ["VSIX_VSCODE_FILE"],
+    os.environ["VSIX_OPENVSX_FILE"],
+]
+api = f"https://api.github.com/repos/{owner}/{repo}"
+headers = {
+    "Authorization": f"Bearer {token}",
+    "Accept": "application/vnd.github+json",
+    "User-Agent": "jenkins-anamnesis-build",
+    "Content-Type": "application/json",
+}
 
-                        RELEASE_ID=$(printf '%s' "${RELEASE_JSON}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || true)
+def request(method, url, data=None, extra_headers=None):
+    body = None
+    req_headers = dict(headers)
+    if extra_headers:
+        req_headers.update(extra_headers)
+    if data is not None:
+        body = json.dumps(data).encode("utf-8")
+    req = urllib.request.Request(url, data=body, headers=req_headers, method=method)
+    try:
+        with urllib.request.urlopen(req) as resp:
+            raw = resp.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            payload = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            payload = {"message": raw}
+        payload["http_status"] = exc.code
+        return payload
 
-                        if [ -z "${RELEASE_ID}" ] || [ "${RELEASE_ID}" = "None" ]; then
-                            echo "Release create response did not include id — checking for existing tag ${TAG} ..."
-                            RELEASE_JSON=$(curl -sS \
-                                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-                                -H "Accept: application/vnd.github+json" \
-                                "${API}/releases/tags/${TAG}")
-                            RELEASE_ID=$(printf '%s' "${RELEASE_JSON}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))")
-                        fi
+print(f"Creating or locating GitHub release {tag} ...")
+create_payload = {
+    "tag_name": tag,
+    "name": version,
+    "body": f"Anamnesis VS Code Extension {version}",
+    "draft": False,
+    "prerelease": False,
+    "generate_release_notes": True,
+}
+release = request("POST", f"{api}/releases", create_payload)
 
-                        if [ -z "${RELEASE_ID}" ] || [ "${RELEASE_ID}" = "None" ]; then
-                            echo "Failed to create or locate GitHub release for ${TAG}."
-                            printf '%s\n' "${RELEASE_JSON}"
-                            exit 1
-                        fi
+if "id" not in release:
+    print(f"Create release response: {json.dumps(release, indent=2)}")
+    if release.get("http_status") == 422 and "already exists" in str(release.get("message", "")).lower():
+        print(f"Release tag {tag} already exists — fetching existing release ...")
+    else:
+        print("Trying to fetch existing release by tag ...")
+    release = request("GET", f"{api}/releases/tags/{tag}", data=None)
 
-                        upload_asset() {
-                            local FILE="$1"
-                            local NAME
-                            NAME="$(basename "${FILE}")"
-                            echo "Uploading ${FILE} to release ${TAG} as ${NAME} ..."
-                            curl -sS -X POST \
-                                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-                                -H "Accept: application/vnd.github+json" \
-                                -H "Content-Type: application/octet-stream" \
-                                --data-binary @"${FILE}" \
-                                "${API}/releases/${RELEASE_ID}/assets?name=${NAME}"
-                            echo ""
-                        }
+if "id" not in release:
+    print("Failed to create or locate GitHub release.", file=sys.stderr)
+    print(json.dumps(release, indent=2), file=sys.stderr)
+    sys.exit(1)
 
-                        upload_asset "${VSIX_FILE}"
-                        upload_asset "${VSIX_VSCODE_FILE}"
-                        upload_asset "${VSIX_OPENVSX_FILE}"
+release_id = release["id"]
+print(f"Using GitHub release id={release_id} tag={tag}")
 
-                        echo "GitHub release published: https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/tag/${TAG}"
+for file_path in assets:
+    if not os.path.isfile(file_path):
+        print(f"Missing asset file: {file_path}", file=sys.stderr)
+        sys.exit(1)
+    name = os.path.basename(file_path)
+    print(f"Uploading {file_path} as {name} ...")
+    with open(file_path, "rb") as fh:
+        file_data = fh.read()
+    upload_headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "Content-Type": "application/octet-stream",
+        "User-Agent": "jenkins-anamnesis-build",
+    }
+    upload_url = f"{api}/releases/{release_id}/assets?name={name}"
+    req = urllib.request.Request(upload_url, data=file_data, headers=upload_headers, method="POST")
+    try:
+        with urllib.request.urlopen(req) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+            print(f"Uploaded {result.get('name', name)} ({result.get('size', len(file_data))} bytes)")
+    except urllib.error.HTTPError as exc:
+        print(f"Asset upload failed for {name}: HTTP {exc.code}", file=sys.stderr)
+        print(exc.read().decode("utf-8", errors="replace"), file=sys.stderr)
+        sys.exit(1)
+
+print(f"GitHub release published: https://github.com/{owner}/{repo}/releases/tag/{tag}")
+PY
                     '''
                 }
             }
