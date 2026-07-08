@@ -16,11 +16,12 @@
 //    3. Verify dist artifacts
 //    4. Strip "-SNAPSHOT" from package.json -> RELEASE version
 //    5. Re-build + package RELEASE VSIX
-//    6. Publish to VS Code Marketplace (publisher: sharadtech)
-//    7. Publish to Open VSX (namespace: sharadtech)
-//    8. Bump package.json to NEXT_DEV_VERSION (job parameter), commit + push
-//    9. Build the next SNAPSHOT
-//   10. Finish
+//    6. Publish to selected marketplaces (checkbox parameters):
+//         - PUBLISH_VSCODE_MARKETPLACE  (publisher: sharadtech)
+//         - PUBLISH_OPEN_VSX            (namespace: sharadtech)
+//    7. Bump package.json to NEXT_DEV_VERSION (job parameter), commit + push
+//    8. Build the next SNAPSHOT
+//    9. Finish
 //
 //  Prerequisites (one-time, outside Jenkins):
 //    - package.json version must end with "-SNAPSHOT" before each release run
@@ -48,7 +49,17 @@ pipeline {
         booleanParam(
             name: 'RELEASE_PROCESS',
             defaultValue: false,
-            description: 'When enabled, performs the full release flow: publish to VS Code Marketplace and Open VSX, bump package.json to NEXT_DEV_VERSION, and push to git. When disabled, only builds the current SNAPSHOT to verify there are no issues.'
+            description: 'When enabled, performs the full release flow: package the release VSIX, publish to selected marketplaces, bump package.json to NEXT_DEV_VERSION, and push to git. When disabled, only builds the current SNAPSHOT to verify there are no issues.'
+        )
+        booleanParam(
+            name: 'PUBLISH_VSCODE_MARKETPLACE',
+            defaultValue: true,
+            description: 'Publish the release VSIX to the VS Code Marketplace (marketplace.visualstudio.com). Only used when RELEASE_PROCESS is enabled.'
+        )
+        booleanParam(
+            name: 'PUBLISH_OPEN_VSX',
+            defaultValue: true,
+            description: 'Publish the release VSIX to Open VSX (open-vsx.org). Only used when RELEASE_PROCESS is enabled.'
         )
         string(
             name: 'NEXT_DEV_VERSION',
@@ -179,6 +190,15 @@ pipeline {
                     def currentVersion = pkg.version
                     echo "Current package.json version: ${currentVersion}"
 
+                    if (!params.PUBLISH_VSCODE_MARKETPLACE && !params.PUBLISH_OPEN_VSX) {
+                        echo "WARNING: No marketplace selected — release package will be created but not published."
+                    } else {
+                        def targets = []
+                        if (params.PUBLISH_VSCODE_MARKETPLACE) targets << 'VS Code Marketplace'
+                        if (params.PUBLISH_OPEN_VSX) targets << 'Open VSX'
+                        echo "Publish targets: ${targets.join(', ')}"
+                    }
+
                     def releaseVersion = currentVersion.replace('-SNAPSHOT', '')
                     env.RELEASE_VERSION = releaseVersion
                     env.VSIX_FILE = "${env.EXTENSION_NAME}-${releaseVersion}.vsix"
@@ -226,7 +246,10 @@ pipeline {
         // ---------------------------------------------------------------------
         stage('Publish VS Code Marketplace') {
             when {
-                expression { params.RELEASE_PROCESS }
+                allOf {
+                    expression { params.RELEASE_PROCESS }
+                    expression { params.PUBLISH_VSCODE_MARKETPLACE }
+                }
             }
             steps {
                 withCredentials([string(credentialsId: env.VSCE_PAT_CREDENTIALS_ID, variable: 'VSCE_PAT')]) {
@@ -243,7 +266,10 @@ pipeline {
         // ---------------------------------------------------------------------
         stage('Publish Open VSX') {
             when {
-                expression { params.RELEASE_PROCESS }
+                allOf {
+                    expression { params.RELEASE_PROCESS }
+                    expression { params.PUBLISH_OPEN_VSX }
+                }
             }
             steps {
                 withCredentials([string(credentialsId: env.OPENVSX_TOKEN_CREDENTIALS_ID, variable: 'OPENVSX_PAT')]) {
@@ -315,12 +341,21 @@ pipeline {
             steps {
                 script {
                     if (params.RELEASE_PROCESS) {
+                        def publishedTo = []
+                        if (params.PUBLISH_VSCODE_MARKETPLACE) publishedTo << 'VS Code Marketplace'
+                        if (params.PUBLISH_OPEN_VSX) publishedTo << 'Open VSX'
+
                         echo "==============================================================="
                         echo " Release job completed successfully."
                         echo "   Released version : ${env.RELEASE_VERSION}"
                         echo "   Extension ID     : ${env.EXTENSION_ID}"
-                        echo "   VS Code Market   : https://marketplace.visualstudio.com/items?itemName=${env.EXTENSION_ID}"
-                        echo "   Open VSX         : ${env.OPENVSX_REGISTRY}/extension/${env.EXTENSION_PUBLISHER}/${env.EXTENSION_NAME}"
+                        echo "   Published to     : ${publishedTo ? publishedTo.join(', ') : '(none — package only)'}"
+                        if (params.PUBLISH_VSCODE_MARKETPLACE) {
+                            echo "   VS Code Market   : https://marketplace.visualstudio.com/items?itemName=${env.EXTENSION_ID}"
+                        }
+                        if (params.PUBLISH_OPEN_VSX) {
+                            echo "   Open VSX         : ${env.OPENVSX_REGISTRY}/extension/${env.EXTENSION_PUBLISHER}/${env.EXTENSION_NAME}"
+                        }
                         echo "   Next dev version : ${params.NEXT_DEV_VERSION}"
                         echo "==============================================================="
                     } else {
@@ -340,7 +375,11 @@ pipeline {
         success {
             script {
                 if (params.RELEASE_PROCESS) {
-                    echo "SUCCESS: Released ${env.EXTENSION_ID}@${env.RELEASE_VERSION}"
+                    def publishedTo = []
+                    if (params.PUBLISH_VSCODE_MARKETPLACE) publishedTo << 'VS Code Marketplace'
+                    if (params.PUBLISH_OPEN_VSX) publishedTo << 'Open VSX'
+                    def publishSummary = publishedTo ? "published to ${publishedTo.join(' + ')}" : 'packaged only (no marketplace publish)'
+                    echo "SUCCESS: Released ${env.EXTENSION_ID}@${env.RELEASE_VERSION} — ${publishSummary}"
                 } else {
                     echo "SUCCESS: SNAPSHOT build passed for ${env.EXTENSION_ID}@${env.SNAPSHOT_VERSION}"
                 }
