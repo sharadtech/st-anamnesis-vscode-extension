@@ -290,7 +290,7 @@ PY
                         fi
                         echo "Publishing ${VSIX_PATH} to VS Code Marketplace ..."
                         npx vsce verify-pat "${EXTENSION_PUBLISHER}"
-                        npx vsce publish "${VSIX_PATH}" --no-yarn
+                        npx vsce publish --packagePath "${VSIX_PATH}" --no-yarn
                     '''
                 }
             }
