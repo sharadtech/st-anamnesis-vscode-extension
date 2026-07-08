@@ -144,5 +144,4 @@ vite.config.ts.timestamp-*
 .vite/
 
 .vscode/**
-.vscodeignore
 *.vsix

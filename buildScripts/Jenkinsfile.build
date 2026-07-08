@@ -216,6 +216,12 @@ pipeline {
                 expression { params.RELEASE_PROCESS }
             }
             steps {
+                script {
+                    if (!fileExists('.vscodeignore')) {
+                        error "Missing .vscodeignore — VSIX would bundle Jenkins dev artifacts (.tools/, node_modules/, etc.). Commit .vscodeignore to the repository."
+                    }
+                }
+
                 sh '''
                     set -eu
                     rm -rf dist
@@ -227,6 +233,16 @@ pipeline {
                     }
                     if (!fileExists(env.VSIX_FILE)) {
                         error "Release package did not produce ${env.VSIX_FILE}."
+                    }
+
+                    def vsixSizeBytes = sh(
+                        script: "stat -c%s '${env.VSIX_FILE}'",
+                        returnStdout: true
+                    ).trim().toLong()
+                    def vsixSizeMb = String.format('%.2f', vsixSizeBytes / (1024.0 * 1024.0))
+                    echo "VSIX size: ${vsixSizeMb} MB (${vsixSizeBytes} bytes)"
+                    if (vsixSizeBytes > 15 * 1024 * 1024) {
+                        error "VSIX is unexpectedly large (${vsixSizeMb} MB). Expected ~1-8 MB. Check .vscodeignore excludes .tools/, node_modules/, src/, and buildScripts/."
                     }
 
                     def pkg = readJSON file: 'package.json'
@@ -275,7 +291,23 @@ pipeline {
                 withCredentials([string(credentialsId: env.OPENVSX_TOKEN_CREDENTIALS_ID, variable: 'OPENVSX_PAT')]) {
                     sh '''
                         set -eu
-                        npx ovsx publish "${VSIX_FILE}" -p "${OPENVSX_PAT}"
+                        MAX_ATTEMPTS=5
+                        ATTEMPT=1
+                        while [ "${ATTEMPT}" -le "${MAX_ATTEMPTS}" ]; do
+                            echo "Open VSX publish attempt ${ATTEMPT}/${MAX_ATTEMPTS} ..."
+                            if npx ovsx publish "${VSIX_FILE}" -p "${OPENVSX_PAT}"; then
+                                echo "Open VSX publish succeeded on attempt ${ATTEMPT}."
+                                exit 0
+                            fi
+                            if [ "${ATTEMPT}" -eq "${MAX_ATTEMPTS}" ]; then
+                                echo "Open VSX publish failed after ${MAX_ATTEMPTS} attempts."
+                                exit 1
+                            fi
+                            DELAY=$((ATTEMPT * 30))
+                            echo "Open VSX publish failed — retrying in ${DELAY}s ..."
+                            sleep "${DELAY}"
+                            ATTEMPT=$((ATTEMPT + 1))
+                        done
                     '''
                 }
             }
