@@ -1,0 +1,17 @@
+.git/**
+.tools/**
+node_modules/**
+src/**
+package-lock.json
+tsconfig.json
+esbuild.js
+.vscode/**
+.vscodeignore
+*.vsix
+.gitignore
+.env
+.env.*
+buildScripts/**
+exImages/**
+logo.svg
+logo.png

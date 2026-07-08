@@ -1,66 +1,43 @@
 // =============================================================================
 //  Anamnesis VS Code Extension — BUILD & RELEASE Jenkinsfile
 // -----------------------------------------------------------------------------
-//  Two modes controlled by the RELEASE_PROCESS checkbox parameter:
+//  Job 1: Build and Release
 //
-//  Build only (RELEASE_PROCESS = false, default):
-//    1. Wipe + Checkout
+//  Flow:
+//    1. Checkout codebase
 //    2. Setup Node
-//    3. Build extension from current package.json
+//    3. Build SNAPSHOT (sanity check)
 //    4. Verify dist artifacts
-//    5. Finish
+//    5. Strip "-SNAPSHOT" from package.json / package-lock.json -> RELEASE version
+//    6. Package release VSIX
+//    7. Upload release artifacts to GitHub Releases (tag v<version>):
+//         - anamnesis-<version>.vsix
+//         - anamnesis-<version>-vscode-marketplace.vsix
+//         - anamnesis-<version>-open-vsx.vsix
+//    8. Bump package.json to NEXT_DEV_VERSION, commit + push
+//    9. Build next SNAPSHOT
+//   10. Finish
 //
-//  Release flow (RELEASE_PROCESS = true):
-//    1. Wipe + Checkout
-//    2. Build extension (sanity check)
-//    3. Verify dist artifacts
-//    4. Set package.json to RELEASE_VERSION (job parameter — independent of repo version)
-//    5. Re-build + package RELEASE VSIX
-//    6. Publish to selected marketplaces (checkbox parameters):
-//         - PUBLISH_VSCODE_MARKETPLACE  (publisher: sharadtech)
-//         - PUBLISH_OPEN_VSX            (namespace: sharadtech)
-//    7. Finish
+//  Prerequisites:
+//    - package.json version must end with "-SNAPSHOT" before each release run
+//    - Open VSX namespace: npx ovsx create-namespace sharadtech -p <token>
 //
-//  package.json version in the repo is not modified or pushed by this pipeline.
-//
-//  Prerequisites (one-time, outside Jenkins):
-//    - Open VSX namespace created:
-//        npx ovsx create-namespace sharadtech -p <OPENVSX_TOKEN>
-//    - Eclipse Publisher Agreement signed at https://open-vsx.org
-//
-//  Required Jenkins credentials (Secret text):
-//    - vsce-sharadtech-pat       : Azure DevOps PAT — Marketplace → Manage
-//    - openvsx-sharadtech-token  : Open VSX access token
+//  Required Jenkins credentials (Secret text unless noted):
+//    - GIT-ssh-sharadtech          : SSH private key (Username with private key)
+//    - github-sharadtech-token     : GitHub PAT with repo + contents:write (releases)
 //
 //  Required Jenkins plugins:
-//    - Pipeline Utility Steps  (readJSON / writeJSON)
-//    - Credentials Binding
-//    - Timestamper, AnsiColor (optional, used in options)
+//    - Pipeline Utility Steps, SSH Agent, Credentials Binding
 // =============================================================================
 
 pipeline {
     agent any
 
     parameters {
-        booleanParam(
-            name: 'RELEASE_PROCESS',
-            defaultValue: false,
-            description: 'When enabled, packages and publishes the RELEASE_VERSION to selected marketplaces. When disabled, only builds the extension from the current package.json to verify there are no issues.'
-        )
         string(
-            name: 'RELEASE_VERSION',
-            defaultValue: '1.4.5',
-            description: 'Semver version to publish (e.g. 1.4.5). Used only when RELEASE_PROCESS is enabled. Independent of the version in package.json.'
-        )
-        booleanParam(
-            name: 'PUBLISH_VSCODE_MARKETPLACE',
-            defaultValue: true,
-            description: 'Publish the release VSIX to the VS Code Marketplace (marketplace.visualstudio.com). Only used when RELEASE_PROCESS is enabled.'
-        )
-        booleanParam(
-            name: 'PUBLISH_OPEN_VSX',
-            defaultValue: true,
-            description: 'Publish the release VSIX to Open VSX (open-vsx.org). Only used when RELEASE_PROCESS is enabled.'
+            name: 'NEXT_DEV_VERSION',
+            defaultValue: '1.4.6-SNAPSHOT',
+            description: 'Next development version to set in package.json AFTER the release is published to GitHub. Must end with "-SNAPSHOT".'
         )
     }
 
@@ -71,27 +48,26 @@ pipeline {
     }
 
     environment {
-        // ---- Extension identity ----
-        EXTENSION_PUBLISHER        = 'sharadtech'
-        EXTENSION_NAME             = 'anamnesis'
-        EXTENSION_ID               = 'sharadtech.anamnesis'
+        GIT_BRANCH                   = 'main'
+        GIT_CREDENTIALS_ID           = 'GIT-ssh-sharadtech'
+        GIT_USER_NAME                = 'Jenkins CI'
+        GIT_USER_EMAIL               = 'ci@sharadtech.local'
 
-        // ---- Marketplace publish credentials ----
-        VSCE_PAT_CREDENTIALS_ID    = 'vsce-sharadtech-pat'
-        OPENVSX_TOKEN_CREDENTIALS_ID = 'openvsx-sharadtech-token'
-        OPENVSX_REGISTRY           = 'https://open-vsx.org'
+        GITHUB_OWNER                 = 'sharadtech'
+        GITHUB_REPO                  = 'st-anamnesis-vscode-extension'
+        GITHUB_TOKEN_CREDENTIALS_ID  = 'github-sharadtech-token'
 
-        // ---- Node.js (downloaded inline by the "Setup Node" stage) ----
-        NODE_VERSION               = '20.18.0'
-        NODE_PLATFORM              = 'linux-x64'
+        EXTENSION_PUBLISHER          = 'sharadtech'
+        EXTENSION_NAME               = 'anamnesis'
+        EXTENSION_ID                 = 'sharadtech.anamnesis'
 
-        // ---- Build artifacts ----
-        DIST_FILE                  = 'dist/extension.js'
+        NODE_VERSION                 = '20.18.0'
+        NODE_PLATFORM                = 'linux-x64'
+        DIST_FILE                    = 'dist/extension.js'
     }
 
     stages {
 
-        // ---------------------------------------------------------------------
         stage('Checkout Codebase') {
             steps {
                 deleteDir()
@@ -100,7 +76,6 @@ pipeline {
             }
         }
 
-        // ---------------------------------------------------------------------
         stage('Setup Node') {
             steps {
                 sh '''
@@ -128,19 +103,17 @@ pipeline {
             }
         }
 
-        // ---------------------------------------------------------------------
-        stage('Build') {
+        stage('Build SNAPSHOT') {
             steps {
                 script {
                     def pkg = readJSON file: 'package.json'
                     def currentVersion = pkg.version
-                    echo "package.json version: ${currentVersion}"
-                    env.BUILD_VERSION = currentVersion
+                    env.SNAPSHOT_VERSION = currentVersion
+                    echo "Building SNAPSHOT version: ${currentVersion}"
 
-                    def buildLabel = params.RELEASE_PROCESS
-                        ? "#${env.BUILD_NUMBER} • release ${params.RELEASE_VERSION}"
-                        : "#${env.BUILD_NUMBER} • build ${currentVersion}"
-                    currentBuild.displayName = buildLabel
+                    if (!currentVersion?.endsWith('-SNAPSHOT')) {
+                        error "Expected package.json version to end with '-SNAPSHOT' but found '${currentVersion}'."
+                    }
                 }
 
                 sh '''
@@ -153,7 +126,6 @@ pipeline {
             }
         }
 
-        // ---------------------------------------------------------------------
         stage('Verify') {
             steps {
                 script {
@@ -161,53 +133,32 @@ pipeline {
                         error "Verify failed: missing ${env.DIST_FILE}"
                     }
                 }
-                sh "ls -la dist"
+                sh 'ls -la dist'
             }
         }
 
-        // ---------------------------------------------------------------------
         stage('Set Release Version') {
-            when {
-                expression { params.RELEASE_PROCESS }
-            }
             steps {
                 script {
-                    def releaseVersion = params.RELEASE_VERSION?.trim()
-                    if (!releaseVersion) {
-                        error "RELEASE_VERSION job parameter is required when RELEASE_PROCESS is enabled."
-                    }
-                    if (!(releaseVersion ==~ /^\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$/)) {
-                        error "RELEASE_VERSION '${releaseVersion}' is not a valid semver (expected e.g. 1.4.5)."
-                    }
-
                     def pkg = readJSON file: 'package.json'
-                    echo "package.json version (unchanged in git): ${pkg.version}"
-                    echo "Publishing as RELEASE_VERSION: ${releaseVersion}"
-
-                    if (!params.PUBLISH_VSCODE_MARKETPLACE && !params.PUBLISH_OPEN_VSX) {
-                        echo "WARNING: No marketplace selected — release package will be created but not published."
-                    } else {
-                        def targets = []
-                        if (params.PUBLISH_VSCODE_MARKETPLACE) targets << 'VS Code Marketplace'
-                        if (params.PUBLISH_OPEN_VSX) targets << 'Open VSX'
-                        echo "Publish targets: ${targets.join(', ')}"
-                    }
+                    def currentVersion = pkg.version
+                    def releaseVersion = currentVersion.replace('-SNAPSHOT', '')
 
                     env.RELEASE_VERSION = releaseVersion
-                    env.VSIX_FILE = "${env.EXTENSION_NAME}-${releaseVersion}.vsix"
+                    env.GIT_TAG           = "v${releaseVersion}"
+                    env.VSIX_FILE         = "${env.EXTENSION_NAME}-${releaseVersion}.vsix"
+                    env.VSIX_VSCODE_FILE  = "${env.EXTENSION_NAME}-${releaseVersion}-vscode-marketplace.vsix"
+                    env.VSIX_OPENVSX_FILE = "${env.EXTENSION_NAME}-${releaseVersion}-open-vsx.vsix"
+
                     currentBuild.displayName = "#${env.BUILD_NUMBER} • ${releaseVersion}"
 
                     sh "npm version ${releaseVersion} --no-git-tag-version --allow-same-version"
-                    echo "package.json version set locally for packaging: ${releaseVersion}"
+                    echo "package.json version set to RELEASE: ${releaseVersion}"
                 }
             }
         }
 
-        // ---------------------------------------------------------------------
         stage('Create Release Package') {
-            when {
-                expression { params.RELEASE_PROCESS }
-            }
             steps {
                 script {
                     writeFile file: '.vscodeignore', text: '''.git/**
@@ -228,7 +179,7 @@ exImages/**
 logo.svg
 logo.png
 '''
-                    echo 'Wrote .vscodeignore for VSIX packaging (excludes .tools/, node_modules/, src/, etc.)'
+                    echo 'Wrote .vscodeignore for VSIX packaging'
                 }
 
                 sh '''
@@ -236,6 +187,7 @@ logo.png
                     rm -rf dist
                     npm run package
                 '''
+
                 script {
                     if (!fileExists(env.DIST_FILE)) {
                         error "Release build did not produce ${env.DIST_FILE}."
@@ -251,153 +203,158 @@ logo.png
                     def vsixSizeMb = String.format('%.2f', vsixSizeBytes / (1024.0 * 1024.0))
                     echo "VSIX size: ${vsixSizeMb} MB (${vsixSizeBytes} bytes)"
                     if (vsixSizeBytes > 15 * 1024 * 1024) {
-                        error "VSIX is unexpectedly large (${vsixSizeMb} MB). Expected ~1-8 MB. Check .vscodeignore excludes .tools/, node_modules/, src/, and buildScripts/."
+                        error "VSIX is unexpectedly large (${vsixSizeMb} MB). Check .vscodeignore."
                     }
 
                     def pkg = readJSON file: 'package.json'
                     if (pkg.version != env.RELEASE_VERSION) {
                         error "package.json version '${pkg.version}' does not match RELEASE_VERSION '${env.RELEASE_VERSION}'."
                     }
-                    if (pkg.publisher != env.EXTENSION_PUBLISHER) {
-                        error "package.json publisher '${pkg.publisher}' does not match expected '${env.EXTENSION_PUBLISHER}'."
-                    }
+
+                    sh """
+                        set -eu
+                        cp '${env.VSIX_FILE}' '${env.VSIX_VSCODE_FILE}'
+                        cp '${env.VSIX_FILE}' '${env.VSIX_OPENVSX_FILE}'
+                        ls -la '${env.VSIX_FILE}' '${env.VSIX_VSCODE_FILE}' '${env.VSIX_OPENVSX_FILE}'
+                    """
+
+                    archiveArtifacts artifacts: "${env.VSIX_FILE},${env.VSIX_VSCODE_FILE},${env.VSIX_OPENVSX_FILE}",
+                                     fingerprint: true,
+                                     onlyIfSuccessful: true
 
                     echo "Release package verified — ${env.EXTENSION_ID} v${env.RELEASE_VERSION}"
-                    archiveArtifacts artifacts: "${env.VSIX_FILE}", fingerprint: true, onlyIfSuccessful: true
                 }
             }
         }
 
-        // ---------------------------------------------------------------------
-        stage('Publish VS Code Marketplace') {
-            when {
-                allOf {
-                    expression { params.RELEASE_PROCESS }
-                    expression { params.PUBLISH_VSCODE_MARKETPLACE }
-                }
-            }
+        stage('Publish GitHub Release') {
             steps {
-                withCredentials([string(credentialsId: env.VSCE_PAT_CREDENTIALS_ID, variable: 'VSCE_PAT')]) {
+                withCredentials([string(credentialsId: env.GITHUB_TOKEN_CREDENTIALS_ID, variable: 'GITHUB_TOKEN')]) {
                     sh '''
                         set -eu
-                        export VSCE_PAT
-                        npx vsce verify-pat "${EXTENSION_PUBLISHER}"
-                        npx vsce publish --no-yarn
-                    '''
-                }
-            }
-        }
+                        GITHUB_TOKEN="$(printf '%s' "${GITHUB_TOKEN}" | sed 's/[[:space:]]*$//')"
+                        export GITHUB_TOKEN
 
-        // ---------------------------------------------------------------------
-        stage('Publish Open VSX') {
-            when {
-                allOf {
-                    expression { params.RELEASE_PROCESS }
-                    expression { params.PUBLISH_OPEN_VSX }
-                }
-            }
-            steps {
-                withCredentials([string(credentialsId: env.OPENVSX_TOKEN_CREDENTIALS_ID, variable: 'OPENVSX_PAT')]) {
-                    sh '''
-                        set -eu
-                        # Jenkins Secret text often adds a trailing newline when the token is pasted.
-                        OVSX_PAT="$(printf '%s' "${OPENVSX_PAT}" | sed 's/[[:space:]]*$//')"
-                        export OVSX_PAT
+                        API="https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}"
+                        TAG="${GIT_TAG}"
+                        RELEASE_NAME="${RELEASE_VERSION}"
 
-                        echo "Verifying Open VSX token for publisher ${EXTENSION_PUBLISHER} ..."
-                        if ! npx ovsx verify-pat "${EXTENSION_PUBLISHER}" --pat "${OVSX_PAT}"; then
-                            echo ""
-                            echo "Open VSX token verification failed."
-                            echo "Check Jenkins credential '${OPENVSX_TOKEN_CREDENTIALS_ID}':"
-                            echo "  - Must be an Open VSX token from https://open-vsx.org/user-settings/tokens"
-                            echo "  - Must NOT be the VS Code Marketplace PAT (vsce-sharadtech-pat)"
-                            echo "  - Re-paste the token with no trailing spaces or newlines"
-                            echo "  - Ensure the Eclipse Publisher Agreement is signed at https://open-vsx.org"
+                        echo "Creating or locating GitHub release ${TAG} ..."
+                        RELEASE_JSON=$(curl -sS -X POST \
+                            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                            -H "Accept: application/vnd.github+json" \
+                            "${API}/releases" \
+                            -d "{\"tag_name\":\"${TAG}\",\"name\":\"${RELEASE_NAME}\",\"body\":\"Anamnesis VS Code Extension ${RELEASE_VERSION}\",\"draft\":false,\"prerelease\":false,\"generate_release_notes\":true}")
+
+                        RELEASE_ID=$(printf '%s' "${RELEASE_JSON}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || true)
+
+                        if [ -z "${RELEASE_ID}" ] || [ "${RELEASE_ID}" = "None" ]; then
+                            echo "Release create response did not include id — checking for existing tag ${TAG} ..."
+                            RELEASE_JSON=$(curl -sS \
+                                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                                -H "Accept: application/vnd.github+json" \
+                                "${API}/releases/tags/${TAG}")
+                            RELEASE_ID=$(printf '%s' "${RELEASE_JSON}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))")
+                        fi
+
+                        if [ -z "${RELEASE_ID}" ] || [ "${RELEASE_ID}" = "None" ]; then
+                            echo "Failed to create or locate GitHub release for ${TAG}."
+                            printf '%s\n' "${RELEASE_JSON}"
                             exit 1
                         fi
 
-                        MAX_ATTEMPTS=5
-                        ATTEMPT=1
-                        while [ "${ATTEMPT}" -le "${MAX_ATTEMPTS}" ]; do
-                            echo "Open VSX publish attempt ${ATTEMPT}/${MAX_ATTEMPTS} ..."
-                            PUBLISH_OUTPUT="$(npx ovsx publish "${VSIX_FILE}" --pat "${OVSX_PAT}" 2>&1)" || PUBLISH_STATUS=$?
-                            PUBLISH_STATUS=${PUBLISH_STATUS:-0}
-                            printf '%s\n' "${PUBLISH_OUTPUT}"
+                        upload_asset() {
+                            local FILE="$1"
+                            local NAME
+                            NAME="$(basename "${FILE}")"
+                            echo "Uploading ${FILE} to release ${TAG} as ${NAME} ..."
+                            curl -sS -X POST \
+                                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                                -H "Accept: application/vnd.github+json" \
+                                -H "Content-Type: application/octet-stream" \
+                                --data-binary @"${FILE}" \
+                                "${API}/releases/${RELEASE_ID}/assets?name=${NAME}"
+                            echo ""
+                        }
 
-                            if [ "${PUBLISH_STATUS}" -eq 0 ]; then
-                                echo "Open VSX publish succeeded on attempt ${ATTEMPT}."
-                                exit 0
-                            fi
+                        upload_asset "${VSIX_FILE}"
+                        upload_asset "${VSIX_VSCODE_FILE}"
+                        upload_asset "${VSIX_OPENVSX_FILE}"
 
-                            if printf '%s' "${PUBLISH_OUTPUT}" | grep -qi 'invalid access token'; then
-                                echo "Open VSX publish aborted — token is invalid (retrying will not help)."
-                                exit 1
-                            fi
-
-                            if [ "${ATTEMPT}" -eq "${MAX_ATTEMPTS}" ]; then
-                                echo "Open VSX publish failed after ${MAX_ATTEMPTS} attempts."
-                                exit 1
-                            fi
-                            DELAY=$((ATTEMPT * 30))
-                            echo "Open VSX publish failed — retrying in ${DELAY}s ..."
-                            sleep "${DELAY}"
-                            ATTEMPT=$((ATTEMPT + 1))
-                        done
+                        echo "GitHub release published: https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/tag/${TAG}"
                     '''
                 }
             }
         }
 
-        // ---------------------------------------------------------------------
-        stage('Finish') {
+        stage('Bump up the version') {
             steps {
                 script {
-                    if (params.RELEASE_PROCESS) {
-                        def publishedTo = []
-                        if (params.PUBLISH_VSCODE_MARKETPLACE) publishedTo << 'VS Code Marketplace'
-                        if (params.PUBLISH_OPEN_VSX) publishedTo << 'Open VSX'
-
-                        echo "==============================================================="
-                        echo " Release job completed successfully."
-                        echo "   Released version : ${env.RELEASE_VERSION}"
-                        echo "   Extension ID     : ${env.EXTENSION_ID}"
-                        echo "   Published to     : ${publishedTo ? publishedTo.join(', ') : '(none — package only)'}"
-                        if (params.PUBLISH_VSCODE_MARKETPLACE) {
-                            echo "   VS Code Market   : https://marketplace.visualstudio.com/items?itemName=${env.EXTENSION_ID}"
-                        }
-                        if (params.PUBLISH_OPEN_VSX) {
-                            echo "   Open VSX         : ${env.OPENVSX_REGISTRY}/extension/${env.EXTENSION_PUBLISHER}/${env.EXTENSION_NAME}"
-                        }
-                        echo "==============================================================="
-                    } else {
-                        echo "==============================================================="
-                        echo " Build completed successfully."
-                        echo "   package.json     : ${env.BUILD_VERSION}"
-                        echo "   Extension ID     : ${env.EXTENSION_ID}"
-                        echo "   Release skipped  : RELEASE_PROCESS was not enabled"
-                        echo "==============================================================="
+                    if (!params.NEXT_DEV_VERSION?.trim()) {
+                        error "NEXT_DEV_VERSION job parameter is required."
+                    }
+                    if (!params.NEXT_DEV_VERSION.endsWith('-SNAPSHOT')) {
+                        error "NEXT_DEV_VERSION '${params.NEXT_DEV_VERSION}' must end with '-SNAPSHOT'."
                     }
                 }
+
+                sh """
+                    set -eu
+                    npm version ${params.NEXT_DEV_VERSION} --no-git-tag-version --allow-same-version
+                """
+
+                sshagent(credentials: [env.GIT_CREDENTIALS_ID]) {
+                    sh """
+                        set -eu
+                        git config user.name  "${env.GIT_USER_NAME}"
+                        git config user.email "${env.GIT_USER_EMAIL}"
+
+                        git add package.json
+                        if [ -f package-lock.json ]; then git add package-lock.json; fi
+
+                        if git diff --cached --quiet; then
+                            echo "No version changes to commit."
+                        else
+                            git commit -m "ci: bump version to ${params.NEXT_DEV_VERSION} [skip ci]"
+                            git push origin HEAD:${env.GIT_BRANCH}
+                        fi
+                    """
+                }
+            }
+        }
+
+        stage('Build Next SNAPSHOT') {
+            steps {
+                sh '''
+                    set -eu
+                    rm -rf dist
+                    npm run build
+                    ls -la dist
+                '''
+            }
+        }
+
+        stage('Finish') {
+            steps {
+                echo "==============================================================="
+                echo " Build & Release job completed successfully."
+                echo "   Released version : ${env.RELEASE_VERSION}"
+                echo "   GitHub release   : https://github.com/${env.GITHUB_OWNER}/${env.GITHUB_REPO}/releases/tag/${env.GIT_TAG}"
+                echo "   Artifacts        : ${env.VSIX_FILE}"
+                echo "                      ${env.VSIX_VSCODE_FILE}"
+                echo "                      ${env.VSIX_OPENVSX_FILE}"
+                echo "   Next dev version : ${params.NEXT_DEV_VERSION}"
+                echo "==============================================================="
             }
         }
     }
 
     post {
         success {
-            script {
-                if (params.RELEASE_PROCESS) {
-                    def publishedTo = []
-                    if (params.PUBLISH_VSCODE_MARKETPLACE) publishedTo << 'VS Code Marketplace'
-                    if (params.PUBLISH_OPEN_VSX) publishedTo << 'Open VSX'
-                    def publishSummary = publishedTo ? "published to ${publishedTo.join(' + ')}" : 'packaged only (no marketplace publish)'
-                    echo "SUCCESS: Released ${env.EXTENSION_ID}@${env.RELEASE_VERSION} — ${publishSummary}"
-                } else {
-                    echo "SUCCESS: Build passed for ${env.EXTENSION_ID}@${env.BUILD_VERSION}"
-                }
-            }
+            echo "SUCCESS: Released ${env.EXTENSION_ID}@${env.RELEASE_VERSION} to GitHub"
         }
         failure {
-            echo "FAILURE: Build job failed at stage '${env.STAGE_NAME}'."
+            echo "FAILURE: Build & Release job failed at stage '${env.STAGE_NAME}'."
         }
     }
 }
