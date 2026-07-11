@@ -3,6 +3,7 @@ import * as vscode from 'vscode';
 import { setWasmDir } from './graphEngine/TreeSitterLoader';
 import './graphEngine/grammars/index';
 import { extractRepo } from './graphEngine/ExtractFile';
+import { GitignoreFilter } from './graphEngine/GitignoreFilter';
 import { buildGraph, graphToSerialized } from './graphEngine/GraphBuilder';
 import { clusterGraph } from './graphEngine/Cluster';
 import { createRepo, uploadGraph, config } from './api';
@@ -26,7 +27,9 @@ export async function generateAndUpload(
 
   const cfg = vscode.workspace.getConfiguration('anamnesis');
   const userExcludes = cfg.get<string[]>('excludeGlobs') || [];
+  const respectGitignore = cfg.get<boolean>('respectGitignore') !== false;
   const filesToExclude = ['dist/', 'build/', 'out/', '.git/', 'node_modules/', ...userExcludes];
+  const gitignoreFilter = respectGitignore ? await GitignoreFilter.create(folderPath) : undefined;
 
   let serialized: ReturnType<typeof graphToSerialized>;
 
@@ -38,7 +41,7 @@ export async function generateAndUpload(
     },
     async (progress) => {
       progress.report({ message: 'Scanning codebase...' });
-      const extraction = await extractRepo(folderPath, filesToExclude);
+      const extraction = await extractRepo(folderPath, { filesToExclude, gitignoreFilter });
 
       progress.report({ message: 'Building graph...' });
       const graph = buildGraph({ companyId: 'vscode', extraction });

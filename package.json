@@ -225,6 +225,11 @@
           },
           "default": [],
           "description": "Additional path prefixes to exclude when scanning a project for knowledge graph generation."
+        },
+        "anamnesis.respectGitignore": {
+          "type": "boolean",
+          "default": true,
+          "description": "When creating a knowledge graph, skip files and folders matched by the project's root .gitignore file."
         }
       }
     }
@@ -232,6 +237,7 @@
   "dependencies": {
     "graphology": "^0.26.0",
     "graphology-communities-louvain": "^2.0.2",
+    "ignore": "^7.0.6",
     "tree-sitter-wasms": "^0.1.11",
     "web-tree-sitter": "^0.25.3"
   },

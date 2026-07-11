@@ -1,6 +1,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { globalExtractorRegistry, type Extractor, type ExtractorContext, type ExtractionResult } from './Extractor';
+import type { GitignoreFilter } from './GitignoreFilter';
 import { isApacheConfig } from './extractors/ApacheConf';
 import { isLikelyShellScript } from './extractors/Bash';
 import { isJenkinsPipelineFile } from './extractors/Jenkins';
@@ -13,6 +14,12 @@ export interface ExtractFileOptions {
   repoRoot: string;
   filePath: string;
   filesToExclude?: string[];
+  gitignoreFilter?: GitignoreFilter;
+}
+
+export interface ExtractRepoOptions {
+  filesToExclude?: string[];
+  gitignoreFilter?: GitignoreFilter;
 }
 
 const SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', 'build', 'out', '.vscode']);
@@ -79,11 +86,22 @@ function resolveExtractor(relativePath: string, source: string, ext: string): Ex
   return globalExtractorRegistry.getForExtension(ext);
 }
 
+function shouldSkipPath(
+  relativePath: string,
+  filesToExclude: string[],
+  gitignoreFilter?: GitignoreFilter
+): boolean {
+  if (isExcluded(relativePath, filesToExclude)) {
+    return true;
+  }
+  return gitignoreFilter?.isIgnored(relativePath) ?? false;
+}
+
 export async function extractFile(options: ExtractFileOptions): Promise<ExtractionResult> {
-  const { repoRoot, filePath, filesToExclude = [] } = options;
+  const { repoRoot, filePath, filesToExclude = [], gitignoreFilter } = options;
   const relativePath = path.relative(repoRoot, filePath).replace(/\\/g, '/');
 
-  if (isExcluded(relativePath, filesToExclude)) {
+  if (shouldSkipPath(relativePath, filesToExclude, gitignoreFilter)) {
     return { nodes: [], edges: [] };
   }
 
@@ -114,24 +132,33 @@ export async function extractFile(options: ExtractFileOptions): Promise<Extracti
 
 export async function extractRepo(
   repoRoot: string,
-  filesToExclude: string[] = []
+  options: ExtractRepoOptions | string[] = {}
 ): Promise<ExtractionResult> {
+  const opts: ExtractRepoOptions = Array.isArray(options) ? { filesToExclude: options } : options;
+  const filesToExclude = opts.filesToExclude ?? [];
+  const gitignoreFilter = opts.gitignoreFilter;
   const results: ExtractionResult[] = [];
 
-  async function walk(dir: string) {
+  async function walk(dir: string, relDir: string) {
     const entries = await fs.readdir(dir, { withFileTypes: true });
     for (const entry of entries) {
       const fullPath = path.join(dir, entry.name);
+      const relPath = relDir ? `${relDir}/${entry.name}` : entry.name;
+
       if (entry.isDirectory()) {
         if (SKIP_DIRS.has(entry.name)) continue;
-        await walk(fullPath);
+        if (shouldSkipPath(relPath, filesToExclude, gitignoreFilter)) continue;
+        if (gitignoreFilter?.isIgnoredDirectory(relPath)) continue;
+        await walk(fullPath, relPath);
       } else if (entry.isFile()) {
-        results.push(await extractFile({ repoRoot, filePath: fullPath, filesToExclude }));
+        if (entry.name === '.gitignore') continue;
+        if (shouldSkipPath(relPath, filesToExclude, gitignoreFilter)) continue;
+        results.push(await extractFile({ repoRoot, filePath: fullPath, filesToExclude, gitignoreFilter }));
       }
     }
   }
 
-  await walk(repoRoot);
+  await walk(repoRoot, '');
 
   const nodes: ExtractionResult['nodes'] = [];
   const edges: ExtractionResult['edges'] = [];
