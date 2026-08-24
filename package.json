@@ -2,7 +2,7 @@
   "name": "anamnesis",
   "displayName": "Anamnesis Cloud",
   "description": "Interactive Anamnesis knowledge graphs for AI-assisted coding.",
-  "version": "1.4.8-SNAPSHOT",
+  "version": "1.4.9-SNAPSHOT",
   "publisher": "sharadtech",
   "license": "MIT",
   "icon": "media/icon.png",
