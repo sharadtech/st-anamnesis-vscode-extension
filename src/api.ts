@@ -39,6 +39,7 @@ export interface ProjectMeta {
 export interface AuthUser {
   companyId: string;
   userId: string;
+  keyId?: string;
   keyName: string;
   role: string;
   email?: string;
@@ -46,10 +47,52 @@ export interface AuthUser {
   lastName?: string;
 }
 
+export interface CipherBlob {
+  v: number;
+  alg: string;
+  kdf: string;
+  kdfSalt: string;
+  keyId?: string;
+  keyName?: string;
+  wrappedDek: string;
+  wrapIv: string;
+  wrapTag: string;
+  iv: string;
+  tag: string;
+  data: string;
+}
+
+export interface CredentialSetRow {
+  _id: string;
+  name: string;
+  description?: string;
+  projectTags?: string[];
+  projectTag?: string;
+  keyCount?: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export function projectTagsOf(row: {
+  projectTags?: string[];
+  projectTag?: string;
+}): string[] {
+  const fromArray = Array.isArray(row.projectTags)
+    ? row.projectTags.map((tag) => String(tag ?? "").trim()).filter(Boolean)
+    : [];
+  const legacy = String(row.projectTag ?? "").trim();
+  return [...new Set(legacy ? [...fromArray, legacy] : fromArray)];
+}
+
+export interface CredentialSetDetail extends CredentialSetRow {
+  cipher: CipherBlob;
+}
+
 export interface PromptRow {
   _id: string;
   title: string;
   prompt: string;
+  promptParameters?: string;
   aiCreatedPrompt: string;
   precision: number;
   status: "processing" | "ready" | "failed";
@@ -115,10 +158,35 @@ function requireConfig(): { serverUrl: string; clientId: string; secretKey: stri
   return { serverUrl, clientId, secretKey };
 }
 
-async function parseEnvelope<T>(res: Response): Promise<T> {
-  const body = (await res.json().catch(() => ({}))) as ApiEnvelope<T>;
+function htmlToSnippet(raw: string): string {
+  return raw.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 180);
+}
+
+async function parseEnvelope<T>(res: Response, payloadBytes?: number): Promise<T> {
+  const raw = await res.text();
+  let body: ApiEnvelope<T> = {};
+  if (raw) {
+    try {
+      body = JSON.parse(raw) as ApiEnvelope<T>;
+    } catch {
+      /* nginx/html errors are not JSON */
+    }
+  }
   if (!res.ok) {
-    throw new Error(body.message || res.statusText || `HTTP ${res.status}`);
+    if (res.status === 413) {
+      const size =
+        payloadBytes !== undefined
+          ? ` This request was ${(payloadBytes / 1024 / 1024).toFixed(1)} MB.`
+          : "";
+      throw new Error(
+        `Upload rejected (HTTP 413 Request Entity Too Large).${size} ` +
+          "The API gateway nginx limit is still 1 MB; raise client_max_body_size " +
+          "on apigateway.anamnesis.cloud to 100m (Express already allows 100 MB) and reload nginx."
+      );
+    }
+    throw new Error(
+      body.message || htmlToSnippet(raw) || res.statusText || `HTTP ${res.status}`
+    );
   }
   if (body.data !== undefined) {
     return body.data;
@@ -126,11 +194,28 @@ async function parseEnvelope<T>(res: Response): Promise<T> {
   return body as unknown as T;
 }
 
+const FETCH_TIMEOUT_MS = 120_000;
+
+async function fetchTimed(url: string, init: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (err) {
+    if (controller.signal.aborted) {
+      throw new Error(`Request timed out after ${FETCH_TIMEOUT_MS / 1000}s: ${url}`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function fetchJson<T>(path: string): Promise<T> {
   const { serverUrl, clientId, secretKey } = requireConfig();
   const url = `${serverUrl}${path}`;
   const headers = authHeaders(clientId, secretKey);
-  const res = await fetch(url, { headers });
+  const res = await fetchTimed(url, { headers });
   return parseEnvelope<T>(res);
 }
 
@@ -142,12 +227,13 @@ async function fetchWithMethod<T>(
   const { serverUrl, clientId, secretKey } = requireConfig();
   const url = `${serverUrl}${path}`;
   const headers = authHeaders(clientId, secretKey);
-  const res = await fetch(url, {
+  const encoded = body !== undefined ? JSON.stringify(body) : undefined;
+  const res = await fetchTimed(url, {
     method,
     headers,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
+    body: encoded,
   });
-  return parseEnvelope<T>(res);
+  return parseEnvelope<T>(res, encoded ? Buffer.byteLength(encoded) : undefined);
 }
 
 export async function fetchGraph(tag?: string): Promise<GraphData> {
@@ -216,7 +302,7 @@ export async function fetchPrompts(projectName: string): Promise<PromptRow[]> {
 
 export async function createPrompt(
   projectName: string,
-  body: { title: string; prompt: string }
+  body: { title: string; prompt: string; promptParameters?: string; skipAiGeneration?: boolean }
 ): Promise<PromptRow> {
   const encoded = encodeURIComponent(projectName);
   return fetchWithMethod<PromptRow>(
@@ -229,7 +315,13 @@ export async function createPrompt(
 export async function updatePrompt(
   projectName: string,
   promptId: string,
-  body: { title: string; prompt: string; validateWithAi?: boolean }
+  body: {
+    title: string;
+    prompt: string;
+    promptParameters?: string;
+    validateWithAi?: boolean;
+    skipAiGeneration?: boolean;
+  }
 ): Promise<PromptRow> {
   const encodedProject = encodeURIComponent(projectName);
   const encodedPrompt = encodeURIComponent(promptId);
@@ -248,6 +340,61 @@ export async function deletePromptEntry(
   const encodedPrompt = encodeURIComponent(promptId);
   return fetchWithMethod<{ deleted: boolean }>(
     `/anamnesis-vscode-ext/projects/${encodedProject}/prompts/${encodedPrompt}`,
+    "DELETE"
+  );
+}
+
+export async function fetchCredentialSets(): Promise<CredentialSetRow[]> {
+  const rows = await fetchJson<CredentialSetRow[]>(
+    `/anamnesis-vscode-ext/credentials`
+  );
+  return Array.isArray(rows) ? rows : [];
+}
+
+export async function fetchCredentialSet(
+  credentialId: string
+): Promise<CredentialSetDetail> {
+  return fetchJson<CredentialSetDetail>(
+    `/anamnesis-vscode-ext/credentials/${encodeURIComponent(credentialId)}`
+  );
+}
+
+export async function createCredentialSet(body: {
+  name: string;
+  description?: string;
+  projectTags?: string[];
+  keyCount: number;
+  cipher: CipherBlob;
+}): Promise<CredentialSetRow> {
+  return fetchWithMethod<CredentialSetRow>(
+    `/anamnesis-vscode-ext/credentials`,
+    "POST",
+    body
+  );
+}
+
+export async function updateCredentialSet(
+  credentialId: string,
+  body: {
+    name: string;
+    description?: string;
+    projectTags?: string[];
+    keyCount: number;
+    cipher: CipherBlob;
+  }
+): Promise<CredentialSetRow> {
+  return fetchWithMethod<CredentialSetRow>(
+    `/anamnesis-vscode-ext/credentials/${encodeURIComponent(credentialId)}`,
+    "PUT",
+    body
+  );
+}
+
+export async function deleteCredentialSet(
+  credentialId: string
+): Promise<{ deleted: boolean }> {
+  return fetchWithMethod<{ deleted: boolean }>(
+    `/anamnesis-vscode-ext/credentials/${encodeURIComponent(credentialId)}`,
     "DELETE"
   );
 }

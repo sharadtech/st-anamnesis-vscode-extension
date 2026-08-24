@@ -3,9 +3,24 @@ import * as vscode from "vscode";
 import { GraphPanel } from "./graphPanel";
 import { SettingsPanel } from "./settingsPanel";
 import { PromptsPanel } from "./promptsPanel";
-import { fetchProjects, fetchAuthUser, deleteGraph, config, AuthUser } from "./api";
+import { CredentialsPanel } from "./credentialsPanel";
+import {
+  fetchProjects,
+  fetchAuthUser,
+  deleteGraph,
+  fetchCredentialSets,
+  deleteCredentialSet,
+  config,
+  AuthUser,
+  CredentialSetRow,
+  projectTagsOf,
+} from "./api";
 import { generateAndUpload } from "./generate";
 import { registerAiTools, unregisterAiTools, syncAiToolsSilently } from "./aiTools";
+import {
+  startCredentialsMcpServer,
+  stopCredentialsMcpServer,
+} from "./credentialsMcpServer";
 
 const AI_TOOLS_DISABLED_KEY = "anamnesis.aiToolsDisabled";
 
@@ -87,6 +102,26 @@ class ProjectPromptTreeItem extends vscode.TreeItem {
 
 type AnamnesisTreeItem = UserHeaderTreeItem | MessageTreeItem | ProjectTreeItem;
 type ProjectPromptsTreeItem = MessageTreeItem | ProjectPromptTreeItem;
+type CredentialsTreeItem = MessageTreeItem | CredentialSetTreeItem;
+
+class CredentialSetTreeItem extends vscode.TreeItem {
+  constructor(
+    public readonly credentialId: string,
+    public readonly setName: string,
+    detail: string
+  ) {
+    super(setName, vscode.TreeItemCollapsibleState.None);
+    this.contextValue = "credentialSet";
+    this.description = detail;
+    this.iconPath = new vscode.ThemeIcon("key");
+    this.tooltip = `Credential set: ${setName}\n${detail}\nClick to open`;
+    this.command = {
+      command: "anamnesis.openCredentialSet",
+      title: "Open Credential Set",
+      arguments: [credentialId],
+    };
+  }
+}
 
 class ProjectsProvider implements vscode.TreeDataProvider<AnamnesisTreeItem> {
   private _onDidChange = new vscode.EventEmitter<void>();
@@ -264,6 +299,87 @@ class ProjectPromptsProvider implements vscode.TreeDataProvider<ProjectPromptsTr
 
 let projectsProvider: ProjectsProvider;
 let projectPromptsProvider: ProjectPromptsProvider;
+let credentialsProvider: CredentialsProvider;
+
+class CredentialsProvider implements vscode.TreeDataProvider<CredentialsTreeItem> {
+  private _onDidChange = new vscode.EventEmitter<void>();
+  readonly onDidChangeTreeData = this._onDidChange.event;
+
+  refresh(): void {
+    this._onDidChange.fire();
+  }
+
+  getTreeItem(element: CredentialsTreeItem): CredentialsTreeItem {
+    return element;
+  }
+
+  async getChildren(element?: CredentialsTreeItem): Promise<CredentialsTreeItem[]> {
+    if (element) {
+      return [];
+    }
+    const { serverUrl, clientId, secretKey } = config();
+    if (!serverUrl || !clientId || !secretKey) {
+      return [
+        new MessageTreeItem(
+          "configure",
+          "Configure Anamnesis",
+          "Set Client Id and Secret Key in Anamnesis Settings",
+          "warning"
+        ),
+      ];
+    }
+
+    try {
+      await fetchAuthUser();
+    } catch (err) {
+      vscode.window.showWarningMessage(
+        `Anamnesis: authentication failed: ${err instanceof Error ? err.message : err}`
+      );
+      return [
+        new MessageTreeItem(
+          "auth-failed",
+          "Authentication failed",
+          "Check Client Id and Secret Key in Anamnesis Settings",
+          "error"
+        ),
+      ];
+    }
+
+    try {
+      const rows = await fetchCredentialSets();
+      if (!rows.length) {
+        return [
+          new MessageTreeItem(
+            "none",
+            "No credentials yet",
+            "Click + to add a credential set",
+            "info"
+          ),
+        ];
+      }
+      return rows.map((row: CredentialSetRow) => {
+        const id = String(row._id ?? "");
+        const count = Number(row.keyCount ?? 0);
+        const tags = projectTagsOf(row);
+        const tag = tags.length ? ` · ${tags.join(", ")}` : "";
+        const detail = `${count} key${count === 1 ? "" : "s"}${tag}`;
+        return new CredentialSetTreeItem(id, row.name, detail);
+      });
+    } catch (err) {
+      vscode.window.showWarningMessage(
+        `Anamnesis: could not load credentials: ${err instanceof Error ? err.message : err}`
+      );
+      return [
+        new MessageTreeItem(
+          "load-failed",
+          "Could not load credentials",
+          err instanceof Error ? err.message : String(err),
+          "error"
+        ),
+      ];
+    }
+  }
+}
 
 export function activate(context: vscode.ExtensionContext): void {
   projectsProvider = new ProjectsProvider();
@@ -279,6 +395,13 @@ export function activate(context: vscode.ExtensionContext): void {
     showCollapseAll: false,
   });
   context.subscriptions.push(promptsTreeView);
+
+  credentialsProvider = new CredentialsProvider();
+  const credentialsTreeView = vscode.window.createTreeView("anamnesis.aiCredentials", {
+    treeDataProvider: credentialsProvider,
+    showCollapseAll: false,
+  });
+  context.subscriptions.push(credentialsTreeView);
 
   context.subscriptions.push(
     vscode.commands.registerCommand("anamnesis.openGraph", async () => {
@@ -318,6 +441,62 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("anamnesis.refreshPrompts", () => {
       projectPromptsProvider.refresh();
     })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("anamnesis.addCredentials", async () => {
+      await CredentialsPanel.createOrShow(context.extensionUri, undefined, () => {
+        credentialsProvider.refresh();
+      });
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("anamnesis.refreshCredentials", () => {
+      credentialsProvider.refresh();
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("anamnesis.openCredentialSet", async (id?: string) => {
+      if (!id) {
+        vscode.window.showWarningMessage("Anamnesis: no credential set selected.");
+        return;
+      }
+      await CredentialsPanel.createOrShow(context.extensionUri, id, () => {
+        credentialsProvider.refresh();
+      });
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "anamnesis.deleteCredentialSet",
+      async (item?: CredentialSetTreeItem | string) => {
+        const id = typeof item === "string" ? item : item?.credentialId;
+        const name = item instanceof CredentialSetTreeItem ? item.setName : "this credential set";
+        if (!id) {
+          return;
+        }
+        const confirm = await vscode.window.showWarningMessage(
+          `Delete credential set "${name}"?\nThis cannot be undone.`,
+          { modal: true },
+          "Delete"
+        );
+        if (confirm !== "Delete") {
+          return;
+        }
+        try {
+          await deleteCredentialSet(id);
+          vscode.window.showInformationMessage(`Anamnesis: deleted credentials "${name}".`);
+          credentialsProvider.refresh();
+        } catch (err) {
+          vscode.window.showErrorMessage(
+            `Anamnesis: delete failed: ${err instanceof Error ? err.message : err}`
+          );
+        }
+      }
+    )
   );
 
   context.subscriptions.push(
@@ -454,6 +633,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (e.affectsConfiguration("anamnesis")) {
         projectsProvider.refresh();
         projectPromptsProvider.refresh();
+        credentialsProvider.refresh();
         if (GraphPanel.current) {
           GraphPanel.current.refresh();
         }
@@ -463,6 +643,14 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   void syncAiToolsIfEnabled(context);
+  void startCredentialsMcpServer()
+    .then(() => syncAiToolsIfEnabled(context))
+    .catch((err) => {
+      console.error(
+        "Anamnesis: could not start local credentials MCP server:",
+        err instanceof Error ? err.message : err
+      );
+    });
 }
 
 async function syncAiToolsIfEnabled(context: vscode.ExtensionContext): Promise<void> {
@@ -470,7 +658,7 @@ async function syncAiToolsIfEnabled(context: vscode.ExtensionContext): Promise<v
     return;
   }
   try {
-    syncAiToolsSilently();
+    await syncAiToolsSilently();
   } catch (err) {
     console.error(
       "Anamnesis: could not auto-register AI tools:",
@@ -481,7 +669,7 @@ async function syncAiToolsIfEnabled(context: vscode.ExtensionContext): Promise<v
 
 async function runRegisterAiTools(): Promise<boolean> {
   try {
-    const res = registerAiTools();
+    const res = await registerAiTools();
     const reload = await vscode.window.showInformationMessage(
       "Anamnesis: AI tools enabled (MCP server + skill). Reload the window so Cursor picks them up.",
       "Reload Window"
@@ -561,4 +749,5 @@ export function deactivate(): void {
   if (GraphPanel.current) {
     GraphPanel.current.dispose();
   }
+  void stopCredentialsMcpServer();
 }

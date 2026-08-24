@@ -28,7 +28,17 @@ export async function generateAndUpload(
   const cfg = vscode.workspace.getConfiguration('anamnesis');
   const userExcludes = cfg.get<string[]>('excludeGlobs') || [];
   const respectGitignore = cfg.get<boolean>('respectGitignore') !== false;
-  const filesToExclude = ['dist/', 'build/', 'out/', '.git/', 'node_modules/', ...userExcludes];
+  const filesToExclude = [
+    'dist/',
+    'build/',
+    'out/',
+    '.git/',
+    'node_modules/',
+    'logs/',
+    'coverage/',
+    'target/',
+    ...userExcludes,
+  ];
   const gitignoreFilter = respectGitignore ? await GitignoreFilter.create(folderPath) : undefined;
 
   let serialized: ReturnType<typeof graphToSerialized>;
@@ -41,17 +51,39 @@ export async function generateAndUpload(
     },
     async (progress) => {
       progress.report({ message: 'Scanning codebase...' });
-      const extraction = await extractRepo(folderPath, { filesToExclude, gitignoreFilter });
+      const extraction = await extractRepo(folderPath, {
+        filesToExclude,
+        gitignoreFilter,
+        onProgress: ({ processed, current }) => {
+          progress.report({ message: `Scanning ${processed} files… ${current}` });
+        },
+      });
 
-      progress.report({ message: 'Building graph...' });
+      progress.report({
+        message: `Building graph (${extraction.nodes.length} symbols)…`,
+      });
       const graph = buildGraph({ companyId: 'vscode', extraction });
-      clusterGraph(graph);
+      try {
+        clusterGraph(graph);
+      } catch (err) {
+        console.error(
+          'Anamnesis: clustering failed, uploading without communities:',
+          err instanceof Error ? err.message : err
+        );
+      }
       serialized = graphToSerialized(graph, 'vscode');
+      const payloadMb = (
+        Buffer.byteLength(JSON.stringify(serialized)) /
+        1024 /
+        1024
+      ).toFixed(1);
 
       progress.report({ message: 'Registering project on server...' });
       await createRepo(projectName);
 
-      progress.report({ message: 'Uploading knowledge graph...' });
+      progress.report({
+        message: `Uploading knowledge graph (${payloadMb} MB, ${serialized.nodes.length} symbols)…`,
+      });
       await uploadGraph(projectName, serialized);
     }
   );

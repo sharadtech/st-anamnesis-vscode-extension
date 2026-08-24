@@ -34,6 +34,7 @@
   "activationEvents": [
     "onView:anamnesis.projects",
     "onView:anamnesis.projectPrompts",
+    "onView:anamnesis.aiCredentials",
     "onCommand:anamnesis.createGraph",
     "onCommand:anamnesis.viewGraph",
     "onCommand:anamnesis.viewPrompts"
@@ -58,6 +59,10 @@
         {
           "id": "anamnesis.projectPrompts",
           "name": "Project Prompts"
+        },
+        {
+          "id": "anamnesis.aiCredentials",
+          "name": "Credentials for AI"
         }
       ]
     },
@@ -86,6 +91,25 @@
         "command": "anamnesis.refreshPrompts",
         "title": "Anamnesis: Refresh Project Prompts",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "anamnesis.addCredentials",
+        "title": "Anamnesis: Add Credentials",
+        "icon": "$(add)"
+      },
+      {
+        "command": "anamnesis.refreshCredentials",
+        "title": "Anamnesis: Refresh Credentials",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "anamnesis.openCredentialSet",
+        "title": "Anamnesis: Open Credential Set"
+      },
+      {
+        "command": "anamnesis.deleteCredentialSet",
+        "title": "Anamnesis: Delete Credential Set",
+        "icon": "$(trash)"
       },
       {
         "command": "anamnesis.openProjectPrompts",
@@ -158,6 +182,16 @@
           "command": "anamnesis.refreshPrompts",
           "when": "view == anamnesis.projectPrompts",
           "group": "navigation"
+        },
+        {
+          "command": "anamnesis.addCredentials",
+          "when": "view == anamnesis.aiCredentials",
+          "group": "navigation@1"
+        },
+        {
+          "command": "anamnesis.refreshCredentials",
+          "when": "view == anamnesis.aiCredentials",
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [
@@ -175,6 +209,11 @@
           "command": "anamnesis.deleteProject",
           "when": "view == anamnesis.projects && viewItem == ownedProject",
           "group": "1_modification@1"
+        },
+        {
+          "command": "anamnesis.deleteCredentialSet",
+          "when": "view == anamnesis.aiCredentials && viewItem == credentialSet",
+          "group": "inline@1"
         }
       ],
       "explorer/context": [
@@ -235,11 +274,13 @@
     }
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "graphology": "^0.26.0",
     "graphology-communities-louvain": "^2.0.2",
     "ignore": "^7.0.6",
     "tree-sitter-wasms": "^0.1.11",
-    "web-tree-sitter": "^0.25.3"
+    "web-tree-sitter": "^0.25.3",
+    "zod": "^3.25.76"
   },
   "scripts": {
     "build": "node esbuild.js",

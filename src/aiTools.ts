@@ -3,8 +3,10 @@ import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
 import { config } from "./api";
+import { startCredentialsMcpServer } from "./credentialsMcpServer";
 
 const MCP_SERVER_KEY = "anamnesis";
+const CREDENTIALS_SERVER_KEY = "anamnesis-credentials";
 const SKILL_NAME = "anamnesis";
 
 function cursorHome(): string {
@@ -78,6 +80,20 @@ own a graph with the same project name without clashing.
 - \`god_nodes(project)\` - most connected nodes (architectural hubs / hotspots).
 - \`query_graph(project, question)\` - keyword-driven scoped subgraph.
 
+## Stored credentials (local MCP)
+
+When the Anamnesis extension is running, a second MCP server **anamnesis-credentials**
+is available on localhost. Ciphertext is stored on the Anamnesis server; decryption
+happens only inside the extension.
+
+- \`list_credential_sets\` - names and metadata of saved credential sets (no secret values).
+- \`get_credentials(name)\` - decrypt a named set locally and return key/value pairs.
+
+Use \`get_credentials\` only when the user refers to a stored credential set
+(for example "use my Production database credentials"). A set may be tagged
+with multiple Anamnesis projects; prefer a set whose \`projectTags\` include
+the current project when more than one match exists.
+
 ## When to fall back to grep/Read
 
 Only after the graph has oriented you and you need the exact source lines to modify,
@@ -93,7 +109,7 @@ export interface RegisterResult {
   skillPath: string;
 }
 
-export function registerAiTools(): RegisterResult {
+export async function registerAiTools(): Promise<RegisterResult> {
   const { serverUrl, clientId, secretKey } = config();
   if (!serverUrl) {
     throw new Error("Set the API Base URL in Anamnesis Settings before registering AI tools.");
@@ -101,6 +117,8 @@ export function registerAiTools(): RegisterResult {
   if (!clientId || !secretKey) {
     throw new Error("Set the Client Id and Secret Key in Anamnesis Settings before registering AI tools.");
   }
+
+  const credentialsMcp = await startCredentialsMcpServer();
 
   fs.mkdirSync(cursorHome(), { recursive: true });
 
@@ -115,6 +133,13 @@ export function registerAiTools(): RegisterResult {
     headers: {
       "X-Client-Id": clientId,
       "X-Secret-Key": secretKey,
+    },
+  };
+  mcp.mcpServers[CREDENTIALS_SERVER_KEY] = {
+    url: credentialsMcp.url,
+    transport: "streamable-http",
+    headers: {
+      Authorization: `Bearer ${credentialsMcp.token}`,
     },
   };
   fs.writeFileSync(mcpJsonPath(), JSON.stringify(mcp, null, 2) + "\n", "utf-8");
@@ -142,8 +167,9 @@ export function unregisterAiTools(): UnregisterResult {
 
   if (fs.existsSync(mcpJsonPath())) {
     const mcp = readJsonSafe(mcpJsonPath());
-    if (mcp.mcpServers && mcp.mcpServers[MCP_SERVER_KEY]) {
+    if (mcp.mcpServers && (mcp.mcpServers[MCP_SERVER_KEY] || mcp.mcpServers[CREDENTIALS_SERVER_KEY])) {
       delete mcp.mcpServers[MCP_SERVER_KEY];
+      delete mcp.mcpServers[CREDENTIALS_SERVER_KEY];
       fs.writeFileSync(mcpJsonPath(), JSON.stringify(mcp, null, 2) + "\n", "utf-8");
       mcpRemoved = true;
     }
@@ -168,10 +194,10 @@ export function canRegisterAiTools(): boolean {
 }
 
 /** Register MCP + skill when credentials are configured. No-op if credentials are missing. */
-export function syncAiToolsSilently(): boolean {
+export async function syncAiToolsSilently(): Promise<boolean> {
   if (!canRegisterAiTools()) {
     return false;
   }
-  registerAiTools();
+  await registerAiTools();
   return true;
 }

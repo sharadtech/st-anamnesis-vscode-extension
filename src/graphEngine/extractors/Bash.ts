@@ -119,6 +119,7 @@ export const bashExtractor: Extractor = {
 
 export function isLikelyShellScript(relativePath: string, source: string): boolean {
   if (/\.(sh|bash)$/i.test(relativePath)) return true;
-  if (/^#!\/.*\/(ba)?sh/m.test(source)) return true;
+  const head = source.slice(0, 256);
+  if (/^#!\/.*\/(ba)?sh/m.test(head)) return true;
   return false;
 }

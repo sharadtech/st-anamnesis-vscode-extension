@@ -54,14 +54,26 @@ export class TreeSitterExtractor implements Extractor {
   }
 
   async extract(source: string, ctx: ExtractorContext): Promise<ExtractionResult> {
+    try {
+      return await this.extractUnsafe(source, ctx);
+    } catch (err) {
+      console.error(
+        `Anamnesis: tree-sitter failed for ${ctx.sourceFile}: ${err instanceof Error ? err.message : err}`
+      );
+      return { nodes: [], edges: [] };
+    }
+  }
+
+  private async extractUnsafe(source: string, ctx: ExtractorContext): Promise<ExtractionResult> {
     await this.init();
     if (!this.parser) {
       return { nodes: [], edges: [] };
     }
 
-    const tree = this.parser.parse(source);
+    const tree = await Promise.resolve(this.parser.parse(source));
     if (!tree) return { nodes: [], edges: [] };
     const root = tree.rootNode;
+    if (!root) return { nodes: [], edges: [] };
     const nodes = new Map<string, GraphNode>();
     const edges: GraphEdge[] = [];
 
@@ -157,6 +169,7 @@ export class TreeSitterExtractor implements Extractor {
     const isType = (node: Node, kinds: string[]) => kinds.includes(node.type);
 
     const walk = (node: Node) => {
+      if (!node) return;
       const cfg = this.nodeConfig;
       const parent = scopeStack.length ? scopeStack[scopeStack.length - 1] : undefined;
 
