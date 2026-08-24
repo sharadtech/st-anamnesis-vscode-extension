@@ -2,17 +2,24 @@
 
 A VS Code extension that builds, uploads, and visualizes **Anamnesis knowledge graphs** on [Anamnesis Cloud](https://www.anamnesis.cloud). Use it for AI-assisted architecture, dependency analysis, and impact exploration across multi-language codebases.
 
+## What's new
+
+- **Credentials for AI** — Store encrypted key/value credential sets in the sidebar and tag them to one or more Anamnesis projects. Cursor agents can list and decrypt them locally via MCP.
+- **Project Prompts** — Manage per-project prompts with **Prompt Parameters**, optional **Skip verification via AI Model**, and a **View** action that renders original, AI-generated, and parameter text as markdown.
+
 ## Key features
 
 - **Create knowledge graphs** — Right-click a workspace folder → **Anamnesis: Create Knowledge Graph**
 - **Projects tree** — Browse graphs stored on the Anamnesis Cloud Server
+- **Project Prompts** — Add, view, edit, and delete prompts for a selected project (parameters + optional skip-AI save)
+- **Credentials for AI** — Encrypted named credential sets, multi-project tags, and local MCP tools for agents
 - **Dual viewer**
   - **Table view** (default): fast render and text filtering for large graphs
   - **Graph view**: Cytoscape.js force-directed, circle, grid, concentric, or preset layouts
 - **Node inspection** — Label, kind, community, source file, line, and neighbors
 - **Click to source** — Open the original file at the correct line from the graph
-- **AI tools** — **Anamnesis: Enable AI Tools (MCP + Skill)** registers an MCP server and Cursor skill so agents query the graph before searching files
-- **Settings panel** — Server URL, credentials, default tag, and **Test Connection**
+- **AI tools** — **Install MCP & Skill** (Settings) or **Anamnesis: Enable AI Tools (MCP + Skill)** registers graph MCP plus a localhost **anamnesis-credentials** MCP server and an agent skill. Paths follow the host IDE (Cursor vs VS Code).
+- **Settings panel** — Server URL, credentials, default tag, **Test Connection**, **Save**, and **Install MCP & Skill**
 
 ## Supported project types
 
@@ -92,13 +99,41 @@ For Java/Maven/AEM repos, add build output folders to **`anamnesis.excludeGlobs`
 
 Default excludes already skip `dist/`, `build/`, `out/`, `.git/`, and `node_modules/`.
 
+## Project Prompts
+
+The **Project Prompts** view in the Anamnesis activity bar lists prompts stored for each knowledge-graph project.
+
+- Open a project row (or use **Anamnesis: View Prompts** on a folder) to load that project's prompt table.
+- **Add Prompt / Edit** dialog fields:
+  - **Title** and **Original Prompt** (required)
+  - **Prompt Parameters** — optional values for placeholders or variables in a generic prompt (for example brand, locale, or task constraints)
+  - **Skip verification via AI Model** — when checked, the original prompt is stored as-is (`ready`) and the server does **not** generate an AI-improved prompt
+- **Actions** on each row:
+  - **View** — markdown preview of Original Prompt, AI Generated Prompt, and Prompt Parameters, each with **Copy**
+  - **Edit** / **Delete**
+- Without skip-AI, create/update still queues AI improvement of the original prompt on the Anamnesis server.
+
+## Credentials for AI
+
+The **Credentials for AI** view stores named key/value sets for agents (database URLs, API tokens, environment secrets, and similar). Ciphertext is saved on Anamnesis Cloud; values are decrypted only inside the extension.
+
+- Toolbar **+** opens **Add Credentials**; click a set to edit it.
+- Each set has a name, one or more key/value pairs, and optional **Project tags**.
+- Tag a set with **multiple** Anamnesis projects so the same credentials apply across graphs. Older single-tag sets still load.
+- After **Install MCP & Skill**, the agent in the current IDE can call:
+  - `list_credential_sets` — names and metadata (no secret values)
+  - `get_credentials(name)` — decrypt a named set locally and return key/value pairs
+- Prefer a set whose project tags include the current graph when more than one match exists.
+
 ## Quick start
 
 1. Install the extension and open **Anamnesis** in the activity bar.
-2. Configure **Anamnesis Settings** (Server URL, Client Id, Secret Key from [Anamnesis Cloud](https://www.anamnesis.cloud)).
+2. Configure **Anamnesis Settings** (Server URL, Client Id, Secret Key from [Anamnesis Cloud](https://www.anamnesis.cloud)). Use **Install MCP & Skill** so the current IDE (Cursor or VS Code) gets the graph MCP server and Anamnesis skill.
 3. Right-click a project folder in the Explorer → **Anamnesis: Create Knowledge Graph**.
 4. Open the project from the **Projects** tree to explore the graph.
-5. Optional: run **Anamnesis: Enable AI Tools (MCP + Skill)** so Cursor/VS Code agents query the graph via MCP.
+5. Use **Project Prompts** to add reusable prompts (with parameters, or skip AI generation).
+6. Use **Credentials for AI** to store encrypted secrets tagged to one or more projects.
+7. Optional: if you skipped the Settings button, run **Anamnesis: Enable AI Tools (MCP + Skill)** from the command palette. The same installer detects Cursor vs VS Code and writes the matching MCP config and skill files.
 
 ## Configuration
 

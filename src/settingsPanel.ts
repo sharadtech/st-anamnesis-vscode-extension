@@ -1,5 +1,10 @@
 import * as vscode from "vscode";
 import { testConnection } from "./api";
+import {
+  AI_TOOLS_DISABLED_KEY,
+  detectIde,
+  registerAiTools,
+} from "./aiTools";
 
 /**
  * A graphical editor for the Anamnesis configuration (API Base URL, Client Id,
@@ -12,9 +17,15 @@ export class SettingsPanel {
   public static current: SettingsPanel | undefined;
   private readonly _panel: vscode.WebviewPanel;
   private readonly _disposables: vscode.Disposable[] = [];
+  private readonly _context: vscode.ExtensionContext;
 
-  private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri) {
+  private constructor(
+    panel: vscode.WebviewPanel,
+    extensionUri: vscode.Uri,
+    context: vscode.ExtensionContext
+  ) {
     this._panel = panel;
+    this._context = context;
     this._panel.onDidDispose(() => this.dispose(), null, this._disposables);
     this._panel.webview.onDidReceiveMessage(
       (msg) => this._onMessage(msg),
@@ -25,12 +36,16 @@ export class SettingsPanel {
     this._pushCurrentValues();
   }
 
-  public static createOrShow(extensionUri: vscode.Uri): SettingsPanel {
+  public static createOrShow(
+    extensionUri: vscode.Uri,
+    context: vscode.ExtensionContext
+  ): SettingsPanel {
     const column = vscode.window.activeTextEditor
       ? vscode.ViewColumn.Two
       : vscode.ViewColumn.One;
     if (SettingsPanel.current) {
       SettingsPanel.current._panel.reveal(column);
+      SettingsPanel.current._pushCurrentValues();
       return SettingsPanel.current;
     }
     const panel = vscode.window.createWebviewPanel(
@@ -43,13 +58,14 @@ export class SettingsPanel {
         localResourceRoots: [],
       }
     );
-    SettingsPanel.current = new SettingsPanel(panel, extensionUri);
+    SettingsPanel.current = new SettingsPanel(panel, extensionUri, context);
     return SettingsPanel.current;
   }
 
   /** Send the current config values so the form is populated on open. */
   private _pushCurrentValues(): void {
     const cfg = vscode.workspace.getConfiguration("anamnesis");
+    const ide = detectIde();
     this._panel.webview.postMessage({
       type: "values",
       serverUrl: cfg.get<string>("serverUrl") ?? "",
@@ -57,6 +73,8 @@ export class SettingsPanel {
       secretKey: cfg.get<string>("secretKey") ?? "",
       defaultTag: cfg.get<string>("defaultTag") ?? "",
       targets: this._availableTargets(),
+      ideLabel: ide.label,
+      ideKind: ide.kind,
     });
   }
 
@@ -87,33 +105,96 @@ export class SettingsPanel {
     }
 
     if (msg.type === "save") {
-      try {
-        const cfg = vscode.workspace.getConfiguration("anamnesis");
-        // Inspect to only update if the value differs, so we don't spam writes.
-        const target =
-          msg.target === "workspace" && vscode.workspace.workspaceFolders
-            ? vscode.ConfigurationTarget.Workspace
-            : vscode.ConfigurationTarget.Global;
+      const saved = await this._saveSettings(msg);
+      this._pushCurrentValues();
+      this._panel.webview.postMessage({
+        type: "saved",
+        ok: saved.ok,
+        target: saved.target,
+        detail: saved.detail,
+      });
+      return;
+    }
 
-        await cfg.update("serverUrl", this._normalizeUrl(msg.serverUrl), target);
-        await cfg.update("clientId", this._normalizeStr(msg.clientId), target);
-        await cfg.update("secretKey", this._normalizeStr(msg.secretKey), target);
-        await cfg.update("defaultTag", this._normalizeStr(msg.defaultTag) || "default", target);
-
-        // Re-send the canonical values back so the form reflects what was saved.
-        this._pushCurrentValues();
+    if (msg.type === "installAiTools") {
+      const saved = await this._saveSettings(msg);
+      this._pushCurrentValues();
+      if (!saved.ok) {
         this._panel.webview.postMessage({
-          type: "saved",
-          ok: true,
-          target: target === vscode.ConfigurationTarget.Workspace ? "Workspace" : "Global",
+          type: "installResult",
+          ok: false,
+          detail: saved.detail || "Could not save settings before installing MCP and Skill.",
         });
+        return;
+      }
+      const clientId = this._normalizeStr(msg.clientId);
+      const secretKey = this._normalizeStr(msg.secretKey);
+      if (!clientId || !secretKey) {
+        this._panel.webview.postMessage({
+          type: "installResult",
+          ok: false,
+          detail: "Client Id and Secret Key are required before installing MCP and Skill.",
+        });
+        return;
+      }
+      try {
+        await this._context.globalState.update(AI_TOOLS_DISABLED_KEY, false);
+        const res = await registerAiTools();
+        this._panel.webview.postMessage({
+          type: "installResult",
+          ok: true,
+          ideLabel: res.ideLabel,
+          mcpPath: res.mcpPath,
+          skillPath: res.skillPath,
+        });
+        const reload = await vscode.window.showInformationMessage(
+          `Anamnesis: MCP and skill installed for ${res.ideLabel}. Reload the window so the IDE picks them up.`,
+          "Reload Window"
+        );
+        if (reload === "Reload Window") {
+          await vscode.commands.executeCommand("workbench.action.reloadWindow");
+        }
       } catch (err) {
         this._panel.webview.postMessage({
-          type: "saved",
+          type: "installResult",
           ok: false,
           detail: err instanceof Error ? err.message : String(err),
         });
       }
+    }
+  }
+
+  private async _saveSettings(msg: {
+    serverUrl?: string;
+    clientId?: string;
+    secretKey?: string;
+    defaultTag?: string;
+    target?: string;
+  }): Promise<{ ok: boolean; target?: string; detail?: string }> {
+    try {
+      const cfg = vscode.workspace.getConfiguration("anamnesis");
+      const target =
+        msg.target === "workspace" && vscode.workspace.workspaceFolders
+          ? vscode.ConfigurationTarget.Workspace
+          : vscode.ConfigurationTarget.Global;
+
+      await cfg.update("serverUrl", this._normalizeUrl(String(msg.serverUrl ?? "")), target);
+      await cfg.update("clientId", this._normalizeStr(String(msg.clientId ?? "")), target);
+      await cfg.update("secretKey", this._normalizeStr(String(msg.secretKey ?? "")), target);
+      await cfg.update(
+        "defaultTag",
+        this._normalizeStr(String(msg.defaultTag ?? "")) || "default",
+        target
+      );
+      return {
+        ok: true,
+        target: target === vscode.ConfigurationTarget.Workspace ? "Workspace" : "Global",
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        detail: err instanceof Error ? err.message : String(err),
+      };
     }
   }
 
@@ -161,7 +242,7 @@ export class SettingsPanel {
       font-size: 12px;
     }
     input[type="password"] { letter-spacing: 0.5px; }
-    .row { display: flex; gap: 8px; align-items: center; margin-top: 18px; }
+    .row { display: flex; gap: 8px; align-items: center; margin-top: 18px; flex-wrap: wrap; }
     button {
       padding: 6px 14px; cursor: pointer; border: none; border-radius: 2px;
       background: var(--vscode-button-background, #0a6f0a);
@@ -188,14 +269,16 @@ export class SettingsPanel {
       border: 2px solid currentColor; border-top-color: transparent;
       animation: a-spin 0.7s linear infinite; vertical-align: -2px; margin-right: 6px; }
     @keyframes a-spin { to { transform: rotate(360deg); } }
-    .target-row { margin-top: 18px; }
+    .target-row { margin-top: 0; }
     .target-row label { display: inline; font-weight: 400; }
+    .ide-hint { color: var(--vscode-descriptionForeground, #888); font-size: 11px; margin-top: 10px; }
   </style>
 </head>
 <body>
   <div class="wrap">
     <h1>Anamnesis Configuration</h1>
     <div class="sub">Connection credentials from Anamnesis Settings → View Credentials in the web app. Changes apply immediately and refresh the Projects view.</div>
+    <div id="ideHint" class="ide-hint"></div>
 
     <div class="field">
       <label for="serverUrl">API Base URL</label>
@@ -226,6 +309,7 @@ export class SettingsPanel {
     <div class="row">
       <button id="testBtn">Test Connection</button>
       <button id="saveBtn" class="secondary">Save</button>
+      <button id="installBtn">Install MCP &amp; Skill</button>
       <div class="target-row">
         <label for="target">Save to:</label>
         <select id="target">
@@ -236,6 +320,7 @@ export class SettingsPanel {
     </div>
 
     <div id="saveStatus" class="status"></div>
+    <div id="installStatus" class="status"></div>
   </div>
   <script nonce="${nonce}">
     (function () {
@@ -247,13 +332,28 @@ export class SettingsPanel {
       const defaultTag = $("defaultTag");
       const testBtn = $("testBtn");
       const saveBtn = $("saveBtn");
+      const installBtn = $("installBtn");
       const target = $("target");
       const testStatus = $("testStatus");
       const saveStatus = $("saveStatus");
+      const installStatus = $("installStatus");
+      const ideHint = $("ideHint");
+
+      function formPayload(type) {
+        return {
+          type: type,
+          serverUrl: serverUrl.value,
+          clientId: clientId.value,
+          secretKey: secretKey.value,
+          defaultTag: defaultTag.value,
+          target: target.value,
+        };
+      }
 
       function setRunning(on) {
         testBtn.disabled = on;
         saveBtn.disabled = on;
+        installBtn.disabled = on;
       }
 
       function showStatus(el, kind, html) {
@@ -277,14 +377,15 @@ export class SettingsPanel {
         setRunning(true);
         showStatus(saveStatus, "info", '<span class="spin"></span>Saving...');
         testStatus.className = "status";
-        vscode.postMessage({
-          type: "save",
-          serverUrl: serverUrl.value,
-          clientId: clientId.value,
-          secretKey: secretKey.value,
-          defaultTag: defaultTag.value,
-          target: target.value,
-        });
+        vscode.postMessage(formPayload("save"));
+      });
+
+      installBtn.addEventListener("click", () => {
+        setRunning(true);
+        showStatus(installStatus, "info", '<span class="spin"></span>Installing MCP and Skill for this IDE...');
+        testStatus.className = "status";
+        saveStatus.className = "status";
+        vscode.postMessage(formPayload("installAiTools"));
       });
 
       window.addEventListener("message", (event) => {
@@ -299,6 +400,11 @@ export class SettingsPanel {
           const hasWs = (msg.targets || []).some((t) => t === 2 /* Workspace */);
           target.querySelector('option[value="workspace"]').disabled = !hasWs;
           if (!hasWs) target.value = "global";
+          if (ideHint) {
+            ideHint.textContent = msg.ideLabel
+              ? "Detected IDE: " + msg.ideLabel + ". Install MCP & Skill writes files for this editor only."
+              : "";
+          }
         } else if (msg.type === "testResult") {
           if (msg.running) return;
           setRunning(false);
@@ -313,6 +419,20 @@ export class SettingsPanel {
             showStatus(saveStatus, "ok", "Saved to " + escapeHtml(msg.target) + " settings. Projects view refreshed.");
           } else {
             showStatus(saveStatus, "err", "Could not save: " + escapeHtml(msg.detail || "unknown error"));
+          }
+        } else if (msg.type === "installResult") {
+          setRunning(false);
+          if (msg.ok) {
+            showStatus(
+              installStatus,
+              "ok",
+              "Installed MCP and Skill for " + escapeHtml(msg.ideLabel) +
+                ".<br>MCP: " + escapeHtml(msg.mcpPath) +
+                "<br>Skill: " + escapeHtml(msg.skillPath) +
+                "<br>Reload the window if the agent does not see the tools yet."
+            );
+          } else {
+            showStatus(installStatus, "err", "Install failed: " + escapeHtml(msg.detail || "unknown error"));
           }
         }
       });

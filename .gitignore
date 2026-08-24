@@ -145,3 +145,4 @@ vite.config.ts.timestamp-*
 
 .vscode/**
 *.vsix
+.DS_Store

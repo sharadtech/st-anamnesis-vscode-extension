@@ -16,13 +16,17 @@ import {
   projectTagsOf,
 } from "./api";
 import { generateAndUpload } from "./generate";
-import { registerAiTools, unregisterAiTools, syncAiToolsSilently } from "./aiTools";
+import {
+  registerAiTools,
+  unregisterAiTools,
+  syncAiToolsSilently,
+  AI_TOOLS_DISABLED_KEY,
+} from "./aiTools";
 import {
   startCredentialsMcpServer,
   stopCredentialsMcpServer,
 } from "./credentialsMcpServer";
 
-const AI_TOOLS_DISABLED_KEY = "anamnesis.aiToolsDisabled";
 
 // ---- TreeView data provider for the Projects view in the Activity Bar ----
 
@@ -511,7 +515,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand("anamnesis.openSettings", () => {
-      SettingsPanel.createOrShow(context.extensionUri);
+      SettingsPanel.createOrShow(context.extensionUri, context);
     })
   );
 
@@ -618,7 +622,7 @@ export function activate(context: vscode.ExtensionContext): void {
           return;
         }
         vscode.window.showInformationMessage(
-          "Anamnesis: removed the AI tools (MCP server + skill). Reload the window to apply."
+          `Anamnesis: removed the AI tools (MCP + skill) from ${res.ideLabel}. Reload the window to apply.`
         );
       } catch (err) {
         vscode.window.showErrorMessage(
@@ -671,7 +675,7 @@ async function runRegisterAiTools(): Promise<boolean> {
   try {
     const res = await registerAiTools();
     const reload = await vscode.window.showInformationMessage(
-      "Anamnesis: AI tools enabled (MCP server + skill). Reload the window so Cursor picks them up.",
+      `Anamnesis: MCP and skill installed for ${res.ideLabel}. Reload the window so the IDE picks them up.`,
       "Reload Window"
     );
     if (reload === "Reload Window") {
