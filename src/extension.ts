@@ -475,6 +475,21 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand(
+      "anamnesis.copyCredentialSetName",
+      async (item?: CredentialSetTreeItem) => {
+        const name = item instanceof CredentialSetTreeItem ? item.setName.trim() : "";
+        if (!name) {
+          vscode.window.showWarningMessage("Anamnesis: no credential name to copy.");
+          return;
+        }
+        await vscode.env.clipboard.writeText(name);
+        vscode.window.showInformationMessage(`Anamnesis: copied credential name "${name}".`);
+      }
+    )
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
       "anamnesis.deleteCredentialSet",
       async (item?: CredentialSetTreeItem | string) => {
         const id = typeof item === "string" ? item : item?.credentialId;

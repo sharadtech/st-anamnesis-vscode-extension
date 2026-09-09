@@ -107,6 +107,11 @@
         "title": "Anamnesis: Open Credential Set"
       },
       {
+        "command": "anamnesis.copyCredentialSetName",
+        "title": "Anamnesis: Copy Credential Name",
+        "icon": "$(copy)"
+      },
+      {
         "command": "anamnesis.deleteCredentialSet",
         "title": "Anamnesis: Delete Credential Set",
         "icon": "$(trash)"
@@ -211,9 +216,19 @@
           "group": "1_modification@1"
         },
         {
-          "command": "anamnesis.deleteCredentialSet",
+          "command": "anamnesis.copyCredentialSetName",
           "when": "view == anamnesis.aiCredentials && viewItem == credentialSet",
           "group": "inline@1"
+        },
+        {
+          "command": "anamnesis.deleteCredentialSet",
+          "when": "view == anamnesis.aiCredentials && viewItem == credentialSet",
+          "group": "inline@2"
+        },
+        {
+          "command": "anamnesis.copyCredentialSetName",
+          "when": "view == anamnesis.aiCredentials && viewItem == credentialSet",
+          "group": "1_modification@1"
         }
       ],
       "explorer/context": [
