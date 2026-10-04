@@ -69,6 +69,7 @@ export interface CredentialSetRow {
   projectTags?: string[];
   projectTag?: string;
   keyCount?: number;
+  locked?: boolean;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -387,6 +388,17 @@ export async function updateCredentialSet(
     `/anamnesis-vscode-ext/credentials/${encodeURIComponent(credentialId)}`,
     "PUT",
     body
+  );
+}
+
+export async function setCredentialSetLocked(
+  credentialId: string,
+  locked: boolean
+): Promise<CredentialSetRow> {
+  return fetchWithMethod<CredentialSetRow>(
+    `/anamnesis-vscode-ext/credentials/${encodeURIComponent(credentialId)}/lock`,
+    "PATCH",
+    { locked }
   );
 }
 

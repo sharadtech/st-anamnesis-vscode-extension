@@ -117,7 +117,9 @@ The **Project Prompts** view in the Anamnesis activity bar lists prompts stored 
 
 The **Credentials for AI** view stores named key/value sets for agents (database URLs, API tokens, environment secrets, and similar). Ciphertext is saved on Anamnesis Cloud; values are decrypted only inside the extension.
 
-- Toolbar **+** opens **Add Credentials**; click a set to edit it.
+- Toolbar **+** opens **Add Credentials**. Click an unlocked set to edit it. Click a locked set to open it read-only, with **Copy** on every field.
+- Each row has **Copy name**, **Lock** or **Unlock**, and **Delete**. Delete is hidden while the set is locked.
+- The editor has **Save**, **Cancel**, **Lock** / **Unlock**, and **Delete**. **Delete** stays disabled until the set is unlocked.
 - Each set has a name, one or more key/value pairs, and optional **Project tags**.
 - Tag a set with **multiple** Anamnesis projects so the same credentials apply across graphs. Older single-tag sets still load.
 - After **Install MCP & Skill**, the agent in the current IDE can call:

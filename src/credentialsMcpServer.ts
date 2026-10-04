@@ -39,7 +39,7 @@ function createServer(): McpServer {
     "list_credential_sets",
     {
       description:
-        "List encrypted credential sets stored for this Anamnesis user. Returns names and metadata only, never secret values.",
+        "List encrypted credential sets stored for this Anamnesis user. Returns names and metadata only, never secret values. Includes whether each set is locked in the sidebar.",
     },
     async () => {
       const rows = await fetchCredentialSets();
@@ -51,6 +51,7 @@ function createServer(): McpServer {
           description: row.description || "",
           projectTags: projectTagsOf(row),
           keyCount: row.keyCount ?? 0,
+          locked: row.locked === true,
           updatedAt: row.updatedAt,
         })),
       });

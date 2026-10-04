@@ -4,12 +4,14 @@ import { GraphPanel } from "./graphPanel";
 import { SettingsPanel } from "./settingsPanel";
 import { PromptsPanel } from "./promptsPanel";
 import { CredentialsPanel } from "./credentialsPanel";
+import { CredentialsViewPanel } from "./credentialsViewPanel";
 import {
   fetchProjects,
   fetchAuthUser,
   deleteGraph,
   fetchCredentialSets,
   deleteCredentialSet,
+  setCredentialSetLocked,
   config,
   AuthUser,
   CredentialSetRow,
@@ -112,17 +114,20 @@ class CredentialSetTreeItem extends vscode.TreeItem {
   constructor(
     public readonly credentialId: string,
     public readonly setName: string,
-    detail: string
+    detail: string,
+    public readonly locked: boolean
   ) {
     super(setName, vscode.TreeItemCollapsibleState.None);
-    this.contextValue = "credentialSet";
-    this.description = detail;
-    this.iconPath = new vscode.ThemeIcon("key");
-    this.tooltip = `Credential set: ${setName}\n${detail}\nClick to open`;
+    this.contextValue = locked ? "credentialSetLocked" : "credentialSet";
+    this.description = locked ? `${detail} · locked` : detail;
+    this.iconPath = new vscode.ThemeIcon(locked ? "lock" : "key");
+    this.tooltip = locked
+      ? `Credential set: ${setName}\n${detail}\nLocked. Click to view.`
+      : `Credential set: ${setName}\n${detail}\nClick to edit`;
     this.command = {
       command: "anamnesis.openCredentialSet",
-      title: "Open Credential Set",
-      arguments: [credentialId],
+      title: locked ? "View Credential Set" : "Open Credential Set",
+      arguments: [credentialId, locked],
     };
   }
 }
@@ -367,7 +372,7 @@ class CredentialsProvider implements vscode.TreeDataProvider<CredentialsTreeItem
         const tags = projectTagsOf(row);
         const tag = tags.length ? ` · ${tags.join(", ")}` : "";
         const detail = `${count} key${count === 1 ? "" : "s"}${tag}`;
-        return new CredentialSetTreeItem(id, row.name, detail);
+        return new CredentialSetTreeItem(id, row.name, detail, row.locked === true);
       });
     } catch (err) {
       vscode.window.showWarningMessage(
@@ -382,6 +387,31 @@ class CredentialsProvider implements vscode.TreeDataProvider<CredentialsTreeItem
         ),
       ];
     }
+  }
+}
+
+async function setCredentialLock(
+  item: CredentialSetTreeItem | undefined,
+  locked: boolean
+): Promise<void> {
+  if (!(item instanceof CredentialSetTreeItem)) {
+    vscode.window.showWarningMessage("Anamnesis: no credential set selected.");
+    return;
+  }
+  try {
+    await setCredentialSetLocked(item.credentialId, locked);
+    credentialsProvider.refresh();
+    CredentialsPanel.current?.syncLock(item.credentialId, locked);
+    CredentialsViewPanel.current?.syncLock(item.credentialId, locked);
+    vscode.window.showInformationMessage(
+      locked
+        ? `Anamnesis: locked credentials "${item.setName}".`
+        : `Anamnesis: unlocked credentials "${item.setName}".`
+    );
+  } catch (err) {
+    vscode.window.showErrorMessage(
+      `Anamnesis: could not update lock: ${err instanceof Error ? err.message : err}`
+    );
   }
 }
 
@@ -462,14 +492,20 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("anamnesis.openCredentialSet", async (id?: string) => {
+    vscode.commands.registerCommand("anamnesis.openCredentialSet", async (id?: string, locked?: boolean) => {
       if (!id) {
         vscode.window.showWarningMessage("Anamnesis: no credential set selected.");
         return;
       }
-      await CredentialsPanel.createOrShow(context.extensionUri, id, () => {
+      const onSaved = () => {
         credentialsProvider.refresh();
-      });
+      };
+      if (locked === true) {
+        CredentialsPanel.closeIf(id);
+        await CredentialsViewPanel.createOrShow(context.extensionUri, id);
+        return;
+      }
+      await CredentialsPanel.createOrShow(context.extensionUri, id, onSaved);
     })
   );
 
@@ -490,11 +526,35 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand(
+      "anamnesis.lockCredentialSet",
+      async (item?: CredentialSetTreeItem) => {
+        await setCredentialLock(item, true);
+      }
+    )
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "anamnesis.unlockCredentialSet",
+      async (item?: CredentialSetTreeItem) => {
+        await setCredentialLock(item, false);
+      }
+    )
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
       "anamnesis.deleteCredentialSet",
       async (item?: CredentialSetTreeItem | string) => {
         const id = typeof item === "string" ? item : item?.credentialId;
         const name = item instanceof CredentialSetTreeItem ? item.setName : "this credential set";
         if (!id) {
+          return;
+        }
+        if (item instanceof CredentialSetTreeItem && item.locked) {
+          vscode.window.showWarningMessage(
+            "Anamnesis: unlock this credential set before deleting it."
+          );
           return;
         }
         const confirm = await vscode.window.showWarningMessage(
@@ -508,6 +568,7 @@ export function activate(context: vscode.ExtensionContext): void {
         try {
           await deleteCredentialSet(id);
           vscode.window.showInformationMessage(`Anamnesis: deleted credentials "${name}".`);
+          CredentialsViewPanel.closeIf(id);
           credentialsProvider.refresh();
         } catch (err) {
           vscode.window.showErrorMessage(

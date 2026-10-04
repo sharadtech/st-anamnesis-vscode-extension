@@ -142,13 +142,17 @@ When the Anamnesis extension is running, a second MCP server **anamnesis-credent
 is available on localhost. Ciphertext is stored on the Anamnesis server; decryption
 happens only inside the extension.
 
-- \`list_credential_sets\` - names and metadata of saved credential sets (no secret values).
+- \`list_credential_sets\` - names and metadata of saved credential sets (no secret values), including whether a set is locked in the sidebar.
 - \`get_credentials(name)\` - decrypt a named set locally and return key/value pairs.
 
 Use \`get_credentials\` only when the user refers to a stored credential set
 (for example "use my Production database credentials"). A set may be tagged
 with multiple Anamnesis projects; prefer a set whose \`projectTags\` include
 the current project when more than one match exists.
+
+A locked set opens read-only in the Anamnesis sidebar and cannot be deleted until
+it is unlocked. Locking does not block these tools: when the user asks for a
+stored set, call \`get_credentials\` as usual.
 
 ## When to fall back to grep/Read
 

@@ -112,6 +112,16 @@
         "icon": "$(copy)"
       },
       {
+        "command": "anamnesis.lockCredentialSet",
+        "title": "Anamnesis: Lock Credential Set",
+        "icon": "$(lock)"
+      },
+      {
+        "command": "anamnesis.unlockCredentialSet",
+        "title": "Anamnesis: Unlock Credential Set",
+        "icon": "$(unlock)"
+      },
+      {
         "command": "anamnesis.deleteCredentialSet",
         "title": "Anamnesis: Delete Credential Set",
         "icon": "$(trash)"
@@ -217,18 +227,43 @@
         },
         {
           "command": "anamnesis.copyCredentialSetName",
-          "when": "view == anamnesis.aiCredentials && viewItem == credentialSet",
+          "when": "view == anamnesis.aiCredentials && (viewItem == credentialSet || viewItem == credentialSetLocked)",
           "group": "inline@1"
         },
         {
-          "command": "anamnesis.deleteCredentialSet",
+          "command": "anamnesis.lockCredentialSet",
           "when": "view == anamnesis.aiCredentials && viewItem == credentialSet",
           "group": "inline@2"
         },
         {
-          "command": "anamnesis.copyCredentialSetName",
+          "command": "anamnesis.unlockCredentialSet",
+          "when": "view == anamnesis.aiCredentials && viewItem == credentialSetLocked",
+          "group": "inline@2"
+        },
+        {
+          "command": "anamnesis.deleteCredentialSet",
           "when": "view == anamnesis.aiCredentials && viewItem == credentialSet",
+          "group": "inline@3"
+        },
+        {
+          "command": "anamnesis.copyCredentialSetName",
+          "when": "view == anamnesis.aiCredentials && (viewItem == credentialSet || viewItem == credentialSetLocked)",
           "group": "1_modification@1"
+        },
+        {
+          "command": "anamnesis.lockCredentialSet",
+          "when": "view == anamnesis.aiCredentials && viewItem == credentialSet",
+          "group": "1_modification@2"
+        },
+        {
+          "command": "anamnesis.unlockCredentialSet",
+          "when": "view == anamnesis.aiCredentials && viewItem == credentialSetLocked",
+          "group": "1_modification@2"
+        },
+        {
+          "command": "anamnesis.deleteCredentialSet",
+          "when": "view == anamnesis.aiCredentials && viewItem == credentialSet",
+          "group": "1_modification@3"
         }
       ],
       "explorer/context": [

@@ -5,6 +5,7 @@ import {
   fetchCredentialSet,
   fetchProjects,
   projectTagsOf,
+  setCredentialSetLocked,
   updateCredentialSet,
 } from "./api";
 import {
@@ -13,12 +14,14 @@ import {
   encryptCredentialSet,
   getEncryptionContext,
 } from "./credentialsCrypto";
+import { CredentialsViewPanel } from "./credentialsViewPanel";
 
 export class CredentialsPanel {
   public static current: CredentialsPanel | undefined;
   private readonly _panel: vscode.WebviewPanel;
   private readonly _disposables: vscode.Disposable[] = [];
   private _credentialId: string | undefined;
+  private _locked = false;
   private _onSaved: (() => void) | undefined;
 
   private constructor(panel: vscode.WebviewPanel, credentialId?: string) {
@@ -71,6 +74,19 @@ export class CredentialsPanel {
     return CredentialsPanel.current;
   }
 
+  public syncLock(credentialId: string, locked: boolean): void {
+    if (this._credentialId !== credentialId) return;
+    this._locked = locked;
+    this._panel.webview.postMessage({ type: "lockState", locked });
+  }
+
+  public static closeIf(credentialId: string | undefined): void {
+    if (!credentialId || !CredentialsPanel.current) return;
+    if (CredentialsPanel.current._credentialId === credentialId) {
+      CredentialsPanel.current._panel.dispose();
+    }
+  }
+
   private async _load(): Promise<void> {
     let knownProjectTags: string[] = [];
     try {
@@ -85,6 +101,7 @@ export class CredentialsPanel {
     }
 
     if (!this._credentialId) {
+      this._locked = false;
       this._panel.webview.postMessage({
         type: "form",
         mode: "create",
@@ -93,6 +110,7 @@ export class CredentialsPanel {
         projectTags: [],
         entries: [{ key: "", type: "text", value: "" }],
         knownProjectTags,
+        locked: false,
       });
       return;
     }
@@ -102,6 +120,7 @@ export class CredentialsPanel {
       const row = await fetchCredentialSet(this._credentialId);
       const ctx = await getEncryptionContext();
       const entries = decryptCredentialSet(row.cipher, ctx);
+      this._locked = row.locked === true;
       this._panel.title = `Credentials: ${row.name}`;
       this._panel.webview.postMessage({
         type: "form",
@@ -112,6 +131,7 @@ export class CredentialsPanel {
         projectTags: projectTagsOf(row),
         entries: entries.length ? entries : [{ key: "", type: "text", value: "" }],
         knownProjectTags,
+        locked: this._locked,
       });
     } catch (err) {
       this._panel.webview.postMessage({
@@ -181,7 +201,10 @@ export class CredentialsPanel {
           vscode.window.showInformationMessage(`Anamnesis: saved credentials "${name}".`);
         }
         this._onSaved?.();
-        this._panel.webview.postMessage({ type: "saved" });
+        this._panel.webview.postMessage({
+          type: "saved",
+          mode: this._credentialId ? "edit" : "create",
+        });
       } catch (err) {
         vscode.window.showErrorMessage(
           `Anamnesis: save failed: ${err instanceof Error ? err.message : err}`
@@ -193,6 +216,12 @@ export class CredentialsPanel {
 
     if (msg.type === "delete") {
       if (!this._credentialId) return;
+      if (this._locked) {
+        vscode.window.showWarningMessage(
+          "Anamnesis: unlock this credential set before deleting it."
+        );
+        return;
+      }
       const name = String(msg.name ?? "this credential set");
       const confirm = await vscode.window.showWarningMessage(
         `Delete credential set "${name}"?\nThis cannot be undone.`,
@@ -204,11 +233,35 @@ export class CredentialsPanel {
         await deleteCredentialSet(this._credentialId);
         vscode.window.showInformationMessage(`Anamnesis: deleted credentials "${name}".`);
         this._onSaved?.();
+        CredentialsViewPanel.closeIf(this._credentialId);
         this._panel.dispose();
       } catch (err) {
         vscode.window.showErrorMessage(
           `Anamnesis: delete failed: ${err instanceof Error ? err.message : err}`
         );
+      }
+    }
+
+    if (msg.type === "toggleLock") {
+      if (!this._credentialId) return;
+      const locked = msg.locked === true;
+      const name = String(msg.name ?? "this credential set");
+      try {
+        await setCredentialSetLocked(this._credentialId, locked);
+        this._locked = locked;
+        this._onSaved?.();
+        CredentialsViewPanel.current?.syncLock(this._credentialId, locked);
+        this._panel.webview.postMessage({ type: "lockState", locked });
+        vscode.window.showInformationMessage(
+          locked
+            ? `Anamnesis: locked credentials "${name}".`
+            : `Anamnesis: unlocked credentials "${name}".`
+        );
+      } catch (err) {
+        vscode.window.showErrorMessage(
+          `Anamnesis: could not update lock: ${err instanceof Error ? err.message : err}`
+        );
+        this._panel.webview.postMessage({ type: "lockError" });
       }
     }
   }
@@ -273,8 +326,10 @@ export class CredentialsPanel {
     @keyframes spin { to { transform: rotate(360deg); } }
     #form { display: none; }
     #form.show { display: block; }
-    #deleteBtn { display: none; }
-    #deleteBtn.show { display: inline-block; }
+    #deleteBtn, #lockBtn { display: none; }
+    #deleteBtn.show, #lockBtn.show { display: inline-block; }
+    #lockHint { display: none; margin-top: 0; }
+    #lockHint.show { display: block; }
   </style>
 </head>
 <body>
@@ -302,8 +357,10 @@ export class CredentialsPanel {
       <div class="actions">
         <button type="submit" id="saveBtn">Save</button>
         <button type="button" class="secondary" id="cancelBtn">Cancel</button>
+        <button type="button" class="secondary" id="lockBtn">Lock</button>
         <button type="button" class="danger" id="deleteBtn">Delete</button>
       </div>
+      <p id="lockHint" class="hint">This credential set is locked. Delete is disabled until you unlock it.</p>
     </form>
   </div>
   <script nonce="${nonce}">
@@ -320,6 +377,27 @@ export class CredentialsPanel {
       const errEl = $("err");
       const saveBtn = $("saveBtn");
       const deleteBtn = $("deleteBtn");
+      const lockBtn = $("lockBtn");
+      const lockHint = $("lockHint");
+      let locked = false;
+
+      function applyLock(isLocked, isEdit) {
+        locked = !!isLocked;
+        if (isEdit) {
+          lockBtn.classList.add("show");
+          lockBtn.disabled = false;
+          lockBtn.textContent = locked ? "Unlock" : "Lock";
+          deleteBtn.disabled = locked;
+          deleteBtn.title = locked ? "Unlock this credential set before deleting" : "";
+          lockHint.classList.toggle("show", locked);
+        } else {
+          lockBtn.classList.remove("show");
+          lockBtn.disabled = false;
+          deleteBtn.disabled = false;
+          deleteBtn.title = "";
+          lockHint.classList.remove("show");
+        }
+      }
 
       function showError(msg) {
         loader.classList.remove("show");
@@ -452,7 +530,16 @@ export class CredentialsPanel {
         vscode.postMessage({ type: "cancel" });
       });
       deleteBtn.addEventListener("click", function () {
+        if (deleteBtn.disabled || locked) return;
         vscode.postMessage({ type: "delete", name: $("name").value || setName });
+      });
+      lockBtn.addEventListener("click", function () {
+        lockBtn.disabled = true;
+        vscode.postMessage({
+          type: "toggleLock",
+          locked: !locked,
+          name: $("name").value || setName
+        });
       });
       form.addEventListener("submit", function (e) {
         e.preventDefault();
@@ -492,6 +579,7 @@ export class CredentialsPanel {
           const entries = msg.entries && msg.entries.length ? msg.entries : [{ key: "", type: "text", value: "" }];
           entries.forEach(addRow);
           deleteBtn.classList.toggle("show", mode === "edit");
+          applyLock(!!msg.locked, mode === "edit");
           saveBtn.disabled = false;
           saveBtn.textContent = "Save";
         } else if (msg.type === "saving") {
@@ -500,6 +588,16 @@ export class CredentialsPanel {
         } else if (msg.type === "saveError" || msg.type === "saved") {
           saveBtn.disabled = false;
           saveBtn.textContent = "Save";
+          if (msg.type === "saved" && msg.mode === "edit") {
+            mode = "edit";
+            $("heading").textContent = "Edit Credentials";
+            deleteBtn.classList.add("show");
+            applyLock(locked, true);
+          }
+        } else if (msg.type === "lockState") {
+          applyLock(!!msg.locked, true);
+        } else if (msg.type === "lockError") {
+          lockBtn.disabled = false;
         }
       });
     })();
