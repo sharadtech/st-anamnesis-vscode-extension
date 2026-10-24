@@ -1,7 +1,7 @@
 {
   "name": "anamnesis",
   "displayName": "Anamnesis Cloud",
-  "description": "Interactive Anamnesis knowledge graphs for AI-assisted coding.",
+  "description": "Interactive Anamnesis knowledge graphs, prompts, credentials, and AI Context for AI-assisted coding.",
   "version": "1.4.11-SNAPSHOT",
   "publisher": "sharadtech",
   "license": "MIT",

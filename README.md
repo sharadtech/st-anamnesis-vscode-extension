@@ -4,7 +4,8 @@ A VS Code extension that builds, uploads, and visualizes **Anamnesis knowledge g
 
 ## What's new
 
-- **Credentials for AI** — Store encrypted key/value credential sets in the sidebar and tag them to one or more Anamnesis projects. Cursor agents can list and decrypt them locally via MCP.
+- **AI Context** — Save a Markdown project brief against a project name. Click a row to read it (tables, and Mermaid when a Mermaid extension is installed). Hover for **Copy**, **Edit**, and **Delete**. Chat can create and fetch these records through MCP.
+- **Credentials for AI** — Store encrypted key/value credential sets in the sidebar and tag them to one or more Anamnesis projects. Agents can list and decrypt them locally via MCP.
 - **Project Prompts** — Manage per-project prompts with **Prompt Parameters**, optional **Skip verification via AI Model**, and a **View** action that renders original, AI-generated, and parameter text as markdown.
 
 ## Key features
@@ -13,6 +14,7 @@ A VS Code extension that builds, uploads, and visualizes **Anamnesis knowledge g
 - **Projects tree** — Browse graphs stored on the Anamnesis Cloud Server
 - **Project Prompts** — Add, view, edit, and delete prompts for a selected project (parameters + optional skip-AI save)
 - **Credentials for AI** — Encrypted named credential sets, multi-project tags, and local MCP tools for agents
+- **AI Context** — Markdown briefs stored per project name, with a read-only viewer and MCP tools to save and fetch them from chat
 - **Dual viewer**
   - **Table view** (default): fast render and text filtering for large graphs
   - **Graph view**: Cytoscape.js force-directed, circle, grid, concentric, or preset layouts
@@ -127,6 +129,44 @@ The **Credentials for AI** view stores named key/value sets for agents (database
   - `get_credentials(name)` — decrypt a named set locally and return key/value pairs
 - Prefer a set whose project tags include the current graph when more than one match exists.
 
+## AI Context
+
+The **AI Context** view stores one Markdown brief per project name. The text lives on Anamnesis Cloud and is what an agent loads when you ask it to fetch that project.
+
+- Toolbar **+** opens **New AI Context**. **Refresh** reloads the list.
+- The form has **Project name**, an **AI Context** text area, **Save**, and **Cancel**. Saving the same project name again replaces the previous text.
+- Click a saved row to open it **read-only**. The project name is a heading. The body is rendered as Markdown, including tables.
+- Mermaid fences in that view are drawn when Cursor or VS Code already has a Mermaid Markdown extension installed. Without one, those fences stay as code.
+- Hover a row for:
+  - **Copy** — copies the project name
+  - **Edit** — opens the form. The row click does not open the editor
+  - **Delete**
+
+After **Install MCP & Skill**, the **anamnesis** MCP server exposes:
+
+| Tool | What it does |
+|------|----------------|
+| `context-save(project, context)` | Creates or replaces the AI Context record for that project name |
+| `get_project_context(key)` | Returns the stored Markdown brief |
+| `list_project_contexts` | Lists project names and a short preview |
+| `save_project_context(key, context)` | Same save as `context-save`, with the project name passed as `key` |
+
+The installed skill treats these sentences as that workflow:
+
+- **Create Anamnesis Context for the project : \<project path\> and store it against the project name = \<project name\>** — read that path (graph first, then the files) and call `context-save`
+- **Use Anamnesis to create AI Context for this conversation against the project name = \<project name\>** — save the current conversation brief
+- **Use Anamnesis and store the Context Information of the project against the key = \<KeyName\>** — same save, using the key as the project name
+- **Use Anamnesis and fetch the project context against the key = \<KeyName\>** — call `get_project_context` and use the returned text as the working brief
+
+**Install MCP & Skill** detects the running IDE and writes only that IDE’s files:
+
+| IDE | MCP config | Skill |
+|-----|------------|--------|
+| Cursor | `~/.cursor/mcp.json` | `~/.cursor/skills/anamnesis/SKILL.md` |
+| Visual Studio Code | User `mcp.json` (for example `~/Library/Application Support/Code/User/mcp.json` on macOS) | `~/.copilot/skills/anamnesis/SKILL.md` |
+
+The settings page shows the detected IDE and those two paths before you install.
+
 ## Quick start
 
 1. Install the extension and open **Anamnesis** in the activity bar.
@@ -135,7 +175,8 @@ The **Credentials for AI** view stores named key/value sets for agents (database
 4. Open the project from the **Projects** tree to explore the graph.
 5. Use **Project Prompts** to add reusable prompts (with parameters, or skip AI generation).
 6. Use **Credentials for AI** to store encrypted secrets tagged to one or more projects.
-7. Optional: if you skipped the Settings button, run **Anamnesis: Enable AI Tools (MCP + Skill)** from the command palette. The same installer detects Cursor vs VS Code and writes the matching MCP config and skill files.
+7. Use **AI Context** to save a Markdown brief for a project, or ask chat to create one with `context-save` after **Install MCP & Skill**.
+8. Optional: if you skipped the Settings button, run **Anamnesis: Enable AI Tools (MCP + Skill)** from the command palette. The same installer detects Cursor vs VS Code and writes the matching MCP config and skill files.
 
 ## Configuration
 
