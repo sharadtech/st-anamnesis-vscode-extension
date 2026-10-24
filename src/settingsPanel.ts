@@ -75,6 +75,8 @@ export class SettingsPanel {
       targets: this._availableTargets(),
       ideLabel: ide.label,
       ideKind: ide.kind,
+      mcpPath: ide.mcpPath,
+      skillPath: ide.skillPath,
     });
   }
 
@@ -402,7 +404,10 @@ export class SettingsPanel {
           if (!hasWs) target.value = "global";
           if (ideHint) {
             ideHint.textContent = msg.ideLabel
-              ? "Detected IDE: " + msg.ideLabel + ". Install MCP & Skill writes files for this editor only."
+              ? "Detected IDE: " + msg.ideLabel +
+                ". Install MCP & Skill writes only for this editor." +
+                (msg.mcpPath ? " MCP: " + msg.mcpPath + "." : "") +
+                (msg.skillPath ? " Skill: " + msg.skillPath + "." : "")
               : "";
           }
         } else if (msg.type === "testResult") {

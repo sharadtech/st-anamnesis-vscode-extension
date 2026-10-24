@@ -125,10 +125,10 @@ class AiContextRecordTreeItem extends vscode.TreeItem {
     this.contextValue = "aiContext";
     this.description = preview;
     this.iconPath = new vscode.ThemeIcon("note");
-    this.tooltip = `AI Context: ${projectName}\nClick to edit`;
+    this.tooltip = `AI Context: ${projectName}\nClick to view`;
     this.command = {
       command: "anamnesis.openAiContext",
-      title: "Open AI Context",
+      title: "View AI Context",
       arguments: [recordId],
     };
   }
@@ -585,7 +585,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand("anamnesis.addAiContext", async () => {
-      await AiContextPanel.createOrShow(context.extensionUri, undefined, () => {
+      await AiContextPanel.createOrShow(context.extensionUri, undefined, "edit", () => {
         aiContextProvider.refresh();
       });
     })
@@ -603,10 +603,40 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.showWarningMessage("Anamnesis: no AI Context record selected.");
         return;
       }
-      await AiContextPanel.createOrShow(context.extensionUri, id, () => {
-        aiContextProvider.refresh();
-      });
+      await AiContextPanel.createOrShow(context.extensionUri, id, "view");
     })
+
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "anamnesis.copyAiContextName",
+      async (item?: AiContextRecordTreeItem) => {
+        const name = item instanceof AiContextRecordTreeItem ? item.projectName.trim() : "";
+        if (!name) {
+          vscode.window.showWarningMessage("Anamnesis: no AI Context name to copy.");
+          return;
+        }
+        await vscode.env.clipboard.writeText(name);
+        vscode.window.showInformationMessage(`Anamnesis: copied AI Context name "${name}".`);
+      }
+    )
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "anamnesis.editAiContext",
+      async (item?: AiContextRecordTreeItem | string) => {
+        const id = typeof item === "string" ? item : item?.recordId;
+        if (!id) {
+          vscode.window.showWarningMessage("Anamnesis: no AI Context record selected.");
+          return;
+        }
+        await AiContextPanel.createOrShow(context.extensionUri, id, "edit", () => {
+          aiContextProvider.refresh();
+        });
+      }
+    )
   );
 
   context.subscriptions.push(

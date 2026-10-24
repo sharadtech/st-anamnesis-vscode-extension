@@ -20,14 +20,13 @@ export interface IdeTarget {
   skillPath: string;
 }
 
+/**
+ * Cursor vs Visual Studio Code. App name alone is not enough: Cursor sometimes
+ * reports a VS Code-compatible name, and a loose "cursor" match must not win
+ * when the running app is Visual Studio Code.
+ */
 export function detectIde(): IdeTarget {
-  const appName = String(vscode.env.appName || "");
-  const scheme = String(vscode.env.uriScheme || "").toLowerCase();
-  const isCursor =
-    scheme === "cursor" ||
-    /cursor/i.test(appName);
-
-  if (isCursor) {
+  if (isCursorIde()) {
     const home = path.join(os.homedir(), ".cursor");
     return {
       kind: "cursor",
@@ -43,6 +42,33 @@ export function detectIde(): IdeTarget {
     mcpPath: path.join(vscodeUserDir(), "mcp.json"),
     skillPath: path.join(os.homedir(), ".copilot", "skills", SKILL_NAME, "SKILL.md"),
   };
+}
+
+function isCursorIde(): boolean {
+  const appName = String(vscode.env.appName || "");
+  const scheme = String(vscode.env.uriScheme || "").toLowerCase();
+  const appRoot = String(vscode.env.appRoot || "");
+  const execPath = String(process.execPath || "");
+  const location = `${appRoot}\n${execPath}`;
+
+  const cursorApp = /Cursor\.app/i.test(location) || /[\\/]Cursor[\\/]/i.test(location);
+  const vscodeApp =
+    /Visual Studio Code( - Insiders)?\.app/i.test(location) ||
+    /VSCodium\.app/i.test(location) ||
+    /[\\/](?:Code|Code - Insiders|VSCodium)[\\/]/i.test(appRoot);
+
+  if (scheme === "cursor" || cursorApp) {
+    return true;
+  }
+  if (
+    scheme === "vscode" ||
+    scheme === "vscode-insiders" ||
+    scheme === "vscodium" ||
+    vscodeApp
+  ) {
+    return false;
+  }
+  return /cursor/i.test(appName) && !/visual studio code/i.test(appName);
 }
 
 function vscodeProductLabel(): string {
@@ -94,7 +120,7 @@ function writeJson(file: string, value: Record<string, unknown>): void {
 function skillContent(serverUrl: string): string {
   return `---
 name: anamnesis
-description: Use the Anamnesis knowledge graph (via the "anamnesis" MCP server) before grep or file search for architecture, dependency, and impact questions. Also use this skill whenever the user says "Use Anamnesis" to store or fetch project AI Context against a key. The graph captures files, classes, functions, methods and their contains/imports/calls relationships.
+description: Use the Anamnesis knowledge graph (via the "anamnesis" MCP server) before grep or file search for architecture, dependency, and impact questions. Also use this skill when the user says "Create Anamnesis Context for the project" or "Use Anamnesis" to create, store, or fetch project AI Context against a project name. The graph captures files, classes, functions, methods and their contains/imports/calls relationships.
 ---
 
 # Anamnesis knowledge graph
@@ -135,7 +161,8 @@ own a graph with the same project name without clashing.
   BEFORE editing a symbol to understand the blast radius.
 - \`god_nodes(project)\` - most connected nodes (architectural hubs / hotspots).
 - \`query_graph(project, question)\` - keyword-driven scoped subgraph.
-- \`save_project_context(key, context)\` - store AI Context text against a project key.
+- \`context-save(project, context)\` - create or replace an AI Context record for a project name. Use this after reading the project path in a "Create Anamnesis Context" request.
+- \`save_project_context(key, context)\` - same AI Context save, using the project name as \`key\`.
 - \`get_project_context(key)\` - fetch the AI Context stored for a project key.
 - \`list_project_contexts\` - list stored AI Context keys and a short preview.
 
@@ -143,12 +170,22 @@ own a graph with the same project name without clashing.
 
 Stored project briefs live in the Anamnesis **AI Context** view and on the **anamnesis** MCP server.
 
-When the user says **Use Anamnesis and store the Context Information of the project against the key = <KeyName>**:
+When the user says **Create Anamnesis Context for the project : <project path> and store it against the project name = <project name>**:
 
-1. Treat \`<KeyName>\` as the project name. Pass it as \`key\`.
-2. Take the project context from the chat: the requirements, architecture notes, conventions, or other brief the user wants remembered. Do not save only the instruction sentence itself.
-3. Call \`save_project_context\` with that \`key\` and the context text.
-4. Confirm the key that was saved. A later save for the same key replaces the previous text.
+1. \`<project path>\` is the codebase to read. \`<project name>\` is the AI Context key. Do not swap them.
+2. Build the context from that path. If an Anamnesis graph exists for \`<project name>\` or that path, query it first (\`graph_stats\`, \`query_graph\`). Then read the project at \`<project path>\` enough to capture architecture, main modules, and conventions.
+3. Call the MCP tool \`context-save\` with \`project\` set to \`<project name>\` and \`context\` set to that brief. Include the source path at the top of the saved text. Do not save only the instruction sentence.
+4. Confirm the project name that was stored. A later save for the same project name replaces the previous record.
+
+When the user asks to create or store AI Context for this conversation, including phrases like:
+
+- **Use Anamnesis to create AI Context for this conversation against the project name = <project name>**
+- **Use Anamnesis and store the Context Information of the project against the key = <KeyName>**
+
+1. Treat \`<project name>\` or \`<KeyName>\` as the project name. Pass it as \`project\`.
+2. Take the AI Context from this conversation: the requirements, decisions, architecture notes, and constraints discussed so far. Do not save only the instruction sentence itself.
+3. Call \`context-save\` with \`project\` set to that name and \`context\` set to the conversation brief. This creates the AI Context record (or replaces it when the same project name already exists).
+4. Confirm the project name that was saved.
 
 When the user says **Use Anamnesis and fetch the project context against the key = <KeyName>**:
 
