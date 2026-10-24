@@ -411,6 +411,49 @@ export async function deleteCredentialSet(
   );
 }
 
+export interface AiContextRow {
+  _id: string;
+  projectName: string;
+  context: string;
+  updatedAt?: string;
+}
+
+export async function fetchAiContexts(): Promise<AiContextRow[]> {
+  const rows = await fetchJson<AiContextRow[]>(`/anamnesis-vscode-ext/ai-context`);
+  return Array.isArray(rows) ? rows : [];
+}
+
+export async function fetchAiContext(id: string): Promise<AiContextRow> {
+  return fetchJson<AiContextRow>(
+    `/anamnesis-vscode-ext/ai-context/${encodeURIComponent(id)}`
+  );
+}
+
+export async function saveAiContext(body: {
+  projectName: string;
+  context: string;
+}): Promise<AiContextRow> {
+  return fetchWithMethod<AiContextRow>(`/anamnesis-vscode-ext/ai-context`, "POST", body);
+}
+
+export async function updateAiContext(
+  id: string,
+  body: { projectName: string; context: string }
+): Promise<AiContextRow> {
+  return fetchWithMethod<AiContextRow>(
+    `/anamnesis-vscode-ext/ai-context/${encodeURIComponent(id)}`,
+    "PUT",
+    body
+  );
+}
+
+export async function deleteAiContext(id: string): Promise<{ deleted: boolean }> {
+  return fetchWithMethod<{ deleted: boolean }>(
+    `/anamnesis-vscode-ext/ai-context/${encodeURIComponent(id)}`,
+    "DELETE"
+  );
+}
+
 interface ApiEnvelopeAuth {
   status?: number;
   message?: string;

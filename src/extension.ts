@@ -5,6 +5,7 @@ import { SettingsPanel } from "./settingsPanel";
 import { PromptsPanel } from "./promptsPanel";
 import { CredentialsPanel } from "./credentialsPanel";
 import { CredentialsViewPanel } from "./credentialsViewPanel";
+import { AiContextPanel } from "./aiContextPanel";
 import {
   fetchProjects,
   fetchAuthUser,
@@ -12,9 +13,12 @@ import {
   fetchCredentialSets,
   deleteCredentialSet,
   setCredentialSetLocked,
+  fetchAiContexts,
+  deleteAiContext,
   config,
   AuthUser,
   CredentialSetRow,
+  AiContextRow,
   projectTagsOf,
 } from "./api";
 import { generateAndUpload } from "./generate";
@@ -109,6 +113,26 @@ class ProjectPromptTreeItem extends vscode.TreeItem {
 type AnamnesisTreeItem = UserHeaderTreeItem | MessageTreeItem | ProjectTreeItem;
 type ProjectPromptsTreeItem = MessageTreeItem | ProjectPromptTreeItem;
 type CredentialsTreeItem = MessageTreeItem | CredentialSetTreeItem;
+type AiContextTreeItem = MessageTreeItem | AiContextRecordTreeItem;
+
+class AiContextRecordTreeItem extends vscode.TreeItem {
+  constructor(
+    public readonly recordId: string,
+    public readonly projectName: string,
+    preview: string
+  ) {
+    super(projectName, vscode.TreeItemCollapsibleState.None);
+    this.contextValue = "aiContext";
+    this.description = preview;
+    this.iconPath = new vscode.ThemeIcon("note");
+    this.tooltip = `AI Context: ${projectName}\nClick to edit`;
+    this.command = {
+      command: "anamnesis.openAiContext",
+      title: "Open AI Context",
+      arguments: [recordId],
+    };
+  }
+}
 
 class CredentialSetTreeItem extends vscode.TreeItem {
   constructor(
@@ -309,6 +333,67 @@ class ProjectPromptsProvider implements vscode.TreeDataProvider<ProjectPromptsTr
 let projectsProvider: ProjectsProvider;
 let projectPromptsProvider: ProjectPromptsProvider;
 let credentialsProvider: CredentialsProvider;
+let aiContextProvider: AiContextProvider;
+
+class AiContextProvider implements vscode.TreeDataProvider<AiContextTreeItem> {
+  private _onDidChange = new vscode.EventEmitter<void>();
+  readonly onDidChangeTreeData = this._onDidChange.event;
+
+  refresh(): void {
+    this._onDidChange.fire();
+  }
+
+  getTreeItem(element: AiContextTreeItem): AiContextTreeItem {
+    return element;
+  }
+
+  async getChildren(element?: AiContextTreeItem): Promise<AiContextTreeItem[]> {
+    if (element) {
+      return [];
+    }
+    const { serverUrl, clientId, secretKey } = config();
+    if (!serverUrl || !clientId || !secretKey) {
+      return [
+        new MessageTreeItem(
+          "configure",
+          "Configure Anamnesis",
+          "Set Client Id and Secret Key in Anamnesis Settings",
+          "warning"
+        ),
+      ];
+    }
+    try {
+      const rows = await fetchAiContexts();
+      if (!rows.length) {
+        return [
+          new MessageTreeItem(
+            "none",
+            "No AI Context yet",
+            "Click + to add project context",
+            "info"
+          ),
+        ];
+      }
+      return rows.map((row: AiContextRow) => {
+        const text = String(row.context || "").replace(/\s+/g, " ").trim();
+        const preview = text.length > 80 ? `${text.slice(0, 80)}…` : text;
+        return new AiContextRecordTreeItem(String(row._id || ""), row.projectName, preview);
+      });
+    } catch (err) {
+      vscode.window.showWarningMessage(
+        `Anamnesis: could not load AI Context: ${err instanceof Error ? err.message : err}`
+      );
+      return [
+        new MessageTreeItem(
+          "load-failed",
+          "Could not load AI Context",
+          err instanceof Error ? err.message : String(err),
+          "error"
+        ),
+      ];
+    }
+  }
+}
 
 class CredentialsProvider implements vscode.TreeDataProvider<CredentialsTreeItem> {
   private _onDidChange = new vscode.EventEmitter<void>();
@@ -437,6 +522,13 @@ export function activate(context: vscode.ExtensionContext): void {
   });
   context.subscriptions.push(credentialsTreeView);
 
+  aiContextProvider = new AiContextProvider();
+  const aiContextTreeView = vscode.window.createTreeView("anamnesis.aiContext", {
+    treeDataProvider: aiContextProvider,
+    showCollapseAll: false,
+  });
+  context.subscriptions.push(aiContextTreeView);
+
   context.subscriptions.push(
     vscode.commands.registerCommand("anamnesis.openGraph", async () => {
       const tag = await pickTag();
@@ -489,6 +581,62 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("anamnesis.refreshCredentials", () => {
       credentialsProvider.refresh();
     })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("anamnesis.addAiContext", async () => {
+      await AiContextPanel.createOrShow(context.extensionUri, undefined, () => {
+        aiContextProvider.refresh();
+      });
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("anamnesis.refreshAiContext", () => {
+      aiContextProvider.refresh();
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("anamnesis.openAiContext", async (id?: string) => {
+      if (!id) {
+        vscode.window.showWarningMessage("Anamnesis: no AI Context record selected.");
+        return;
+      }
+      await AiContextPanel.createOrShow(context.extensionUri, id, () => {
+        aiContextProvider.refresh();
+      });
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "anamnesis.deleteAiContext",
+      async (item?: AiContextRecordTreeItem) => {
+        const id = item instanceof AiContextRecordTreeItem ? item.recordId : "";
+        const name = item instanceof AiContextRecordTreeItem ? item.projectName : "this record";
+        if (!id) {
+          return;
+        }
+        const confirm = await vscode.window.showWarningMessage(
+          `Delete AI Context for "${name}"?`,
+          { modal: true },
+          "Delete"
+        );
+        if (confirm !== "Delete") {
+          return;
+        }
+        try {
+          await deleteAiContext(id);
+          vscode.window.showInformationMessage(`Anamnesis: deleted AI Context "${name}".`);
+          aiContextProvider.refresh();
+        } catch (err) {
+          vscode.window.showErrorMessage(
+            `Anamnesis: delete failed: ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+      }
+    )
   );
 
   context.subscriptions.push(
@@ -714,6 +862,7 @@ export function activate(context: vscode.ExtensionContext): void {
         projectsProvider.refresh();
         projectPromptsProvider.refresh();
         credentialsProvider.refresh();
+        aiContextProvider.refresh();
         if (GraphPanel.current) {
           GraphPanel.current.refresh();
         }

@@ -35,6 +35,7 @@
     "onView:anamnesis.projects",
     "onView:anamnesis.projectPrompts",
     "onView:anamnesis.aiCredentials",
+    "onView:anamnesis.aiContext",
     "onCommand:anamnesis.createGraph",
     "onCommand:anamnesis.viewGraph",
     "onCommand:anamnesis.viewPrompts"
@@ -63,6 +64,10 @@
         {
           "id": "anamnesis.aiCredentials",
           "name": "Credentials for AI"
+        },
+        {
+          "id": "anamnesis.aiContext",
+          "name": "AI Context"
         }
       ]
     },
@@ -101,6 +106,25 @@
         "command": "anamnesis.refreshCredentials",
         "title": "Anamnesis: Refresh Credentials",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "anamnesis.addAiContext",
+        "title": "Anamnesis: Add AI Context",
+        "icon": "$(add)"
+      },
+      {
+        "command": "anamnesis.refreshAiContext",
+        "title": "Anamnesis: Refresh AI Context",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "anamnesis.openAiContext",
+        "title": "Anamnesis: Open AI Context"
+      },
+      {
+        "command": "anamnesis.deleteAiContext",
+        "title": "Anamnesis: Delete AI Context",
+        "icon": "$(trash)"
       },
       {
         "command": "anamnesis.openCredentialSet",
@@ -207,6 +231,16 @@
           "command": "anamnesis.refreshCredentials",
           "when": "view == anamnesis.aiCredentials",
           "group": "navigation@2"
+        },
+        {
+          "command": "anamnesis.addAiContext",
+          "when": "view == anamnesis.aiContext",
+          "group": "navigation@1"
+        },
+        {
+          "command": "anamnesis.refreshAiContext",
+          "when": "view == anamnesis.aiContext",
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [
@@ -264,6 +298,11 @@
           "command": "anamnesis.deleteCredentialSet",
           "when": "view == anamnesis.aiCredentials && viewItem == credentialSet",
           "group": "1_modification@3"
+        },
+        {
+          "command": "anamnesis.deleteAiContext",
+          "when": "view == anamnesis.aiContext && viewItem == aiContext",
+          "group": "inline@1"
         }
       ],
       "explorer/context": [

@@ -94,7 +94,7 @@ function writeJson(file: string, value: Record<string, unknown>): void {
 function skillContent(serverUrl: string): string {
   return `---
 name: anamnesis
-description: Use the Anamnesis knowledge graph (via the "anamnesis" MCP server) to answer architecture, dependency, and impact questions about the current codebase before reading files with grep/search. The graph captures files, classes, functions, methods and their contains/imports/calls relationships.
+description: Use the Anamnesis knowledge graph (via the "anamnesis" MCP server) before grep or file search for architecture, dependency, and impact questions. Also use this skill whenever the user says "Use Anamnesis" to store or fetch project AI Context against a key. The graph captures files, classes, functions, methods and their contains/imports/calls relationships.
 ---
 
 # Anamnesis knowledge graph
@@ -135,6 +135,26 @@ own a graph with the same project name without clashing.
   BEFORE editing a symbol to understand the blast radius.
 - \`god_nodes(project)\` - most connected nodes (architectural hubs / hotspots).
 - \`query_graph(project, question)\` - keyword-driven scoped subgraph.
+- \`save_project_context(key, context)\` - store AI Context text against a project key.
+- \`get_project_context(key)\` - fetch the AI Context stored for a project key.
+- \`list_project_contexts\` - list stored AI Context keys and a short preview.
+
+## AI Context
+
+Stored project briefs live in the Anamnesis **AI Context** view and on the **anamnesis** MCP server.
+
+When the user says **Use Anamnesis and store the Context Information of the project against the key = <KeyName>**:
+
+1. Treat \`<KeyName>\` as the project name. Pass it as \`key\`.
+2. Take the project context from the chat: the requirements, architecture notes, conventions, or other brief the user wants remembered. Do not save only the instruction sentence itself.
+3. Call \`save_project_context\` with that \`key\` and the context text.
+4. Confirm the key that was saved. A later save for the same key replaces the previous text.
+
+When the user says **Use Anamnesis and fetch the project context against the key = <KeyName>**:
+
+1. Call \`get_project_context\` with \`key\` set to \`<KeyName>\`.
+2. Treat the returned \`context\` as the working brief for the current request. Follow it when planning and delivering the new requirement.
+3. If no context is stored for that key, say so and continue without inventing a stored brief.
 
 ## Stored credentials (local MCP)
 
