@@ -44,6 +44,56 @@ export function detectIde(): IdeTarget {
   };
 }
 
+function cursorTarget(): IdeTarget {
+  const home = path.join(os.homedir(), ".cursor");
+  return {
+    kind: "cursor",
+    label: "Cursor",
+    mcpPath: path.join(home, "mcp.json"),
+    skillPath: path.join(home, "skills", SKILL_NAME, "SKILL.md"),
+  };
+}
+
+/** Stable VS Code user dir (used when the running app is Cursor). */
+function vscodeTargetFor(folder: string, label: string): IdeTarget {
+  let userDir: string;
+  if (process.platform === "darwin") {
+    userDir = path.join(os.homedir(), "Library", "Application Support", folder, "User");
+  } else if (process.platform === "win32") {
+    userDir = path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), folder, "User");
+  } else {
+    userDir = path.join(os.homedir(), ".config", folder, "User");
+  }
+  return {
+    kind: "vscode",
+    label,
+    mcpPath: path.join(userDir, "mcp.json"),
+    skillPath: path.join(os.homedir(), ".copilot", "skills", SKILL_NAME, "SKILL.md"),
+  };
+}
+
+/**
+ * The running IDE plus every other supported IDE installed on this machine, so
+ * one Install (or one restart of either IDE) refreshes all of them with the
+ * shared credentials-MCP port and token.
+ */
+export function allIdeTargets(): IdeTarget[] {
+  const running = detectIde();
+  const targets: IdeTarget[] = [running];
+  if (running.kind === "vscode") {
+    const cursor = cursorTarget();
+    if (fs.existsSync(path.dirname(cursor.mcpPath))) {
+      targets.push(cursor);
+    }
+  } else {
+    const vscodeStable = vscodeTargetFor("Code", "Visual Studio Code");
+    if (fs.existsSync(path.dirname(vscodeStable.mcpPath))) {
+      targets.push(vscodeStable);
+    }
+  }
+  return targets;
+}
+
 function isCursorIde(): boolean {
   const appName = String(vscode.env.appName || "");
   const scheme = String(vscode.env.uriScheme || "").toLowerCase();
@@ -316,6 +366,114 @@ function removeMcpKeys(mcpPath: string, rootKey: "mcpServers" | "servers"): bool
   return true;
 }
 
+/**
+ * Claude Code (CLI and its VS Code / Cursor extension) does not read the IDE's
+ * mcp.json. User-scope MCP servers live in ~/.claude.json under "mcpServers",
+ * and personal skills in ~/.claude/skills/<name>/SKILL.md. Written from both
+ * IDEs so Claude Code always has the current credentials-MCP port and token.
+ */
+export interface ClaudeCodeTarget {
+  configPath: string;
+  skillPath: string;
+}
+
+export function claudeCodeTarget(): ClaudeCodeTarget {
+  const home = os.homedir();
+  return {
+    configPath: path.join(home, ".claude.json"),
+    skillPath: path.join(home, ".claude", "skills", SKILL_NAME, "SKILL.md"),
+  };
+}
+
+/** Only touch Claude Code files when Claude Code has been used on this machine. */
+function claudeCodeInstalled(): boolean {
+  const t = claudeCodeTarget();
+  return fs.existsSync(t.configPath) || fs.existsSync(path.join(os.homedir(), ".claude"));
+}
+
+function claudeCodeMcpEntry(
+  serverUrl: string,
+  clientId: string,
+  secretKey: string,
+  credentialsUrl: string,
+  token: string
+): Record<string, unknown> {
+  return {
+    [MCP_SERVER_KEY]: {
+      type: "http",
+      url: `${serverUrl}/anamnesis-vscode-ext/mcp`,
+      headers: {
+        "X-Client-Id": clientId,
+        "X-Secret-Key": secretKey,
+      },
+    },
+    [CREDENTIALS_SERVER_KEY]: {
+      type: "http",
+      url: credentialsUrl,
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    },
+  };
+}
+
+/**
+ * ~/.claude.json is large and rewritten by Claude Code itself, so: refuse to
+ * touch it if it does not parse, skip the write when nothing changed, and
+ * replace it atomically (temp file + rename) keeping its permissions.
+ */
+function writeClaudeCodeMcp(configPath: string, entries: Record<string, unknown>): boolean {
+  let doc: Record<string, any> = {};
+  let mode = 0o600;
+  if (fs.existsSync(configPath)) {
+    const raw = fs.readFileSync(configPath, "utf-8");
+    try {
+      doc = raw.trim() ? JSON.parse(raw) : {};
+    } catch {
+      throw new Error(`${configPath} is not valid JSON; not modifying it.`);
+    }
+    mode = fs.statSync(configPath).mode & 0o777;
+  }
+  if (!doc.mcpServers || typeof doc.mcpServers !== "object") {
+    doc.mcpServers = {};
+  }
+  const changed = Object.entries(entries).some(
+    ([k, v]) => JSON.stringify(doc.mcpServers[k]) !== JSON.stringify(v)
+  );
+  if (!changed) {
+    return false;
+  }
+  Object.assign(doc.mcpServers, entries);
+  const tmp = `${configPath}.anamnesis-${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(doc, null, 2) + "\n", { encoding: "utf-8", mode });
+  fs.renameSync(tmp, configPath);
+  return true;
+}
+
+function removeClaudeCodeMcp(configPath: string): boolean {
+  if (!fs.existsSync(configPath)) {
+    return false;
+  }
+  let doc: Record<string, any>;
+  try {
+    doc = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+  } catch {
+    return false;
+  }
+  const bucket = doc.mcpServers;
+  if (!bucket || typeof bucket !== "object" ||
+      (!(MCP_SERVER_KEY in bucket) && !(CREDENTIALS_SERVER_KEY in bucket))) {
+    return false;
+  }
+  delete bucket[MCP_SERVER_KEY];
+  delete bucket[CREDENTIALS_SERVER_KEY];
+  const mode = fs.statSync(configPath).mode & 0o777;
+  const tmp = `${configPath}.anamnesis-${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(doc, null, 2) + "\n", { encoding: "utf-8", mode });
+  fs.renameSync(tmp, configPath);
+  return true;
+}
+
 export interface RegisterResult {
   mcpUpdated: boolean;
   skillWritten: boolean;
@@ -323,6 +481,12 @@ export interface RegisterResult {
   skillPath: string;
   ide: IdeKind;
   ideLabel: string;
+  /** Other installed IDEs whose mcp.json and skill were also refreshed. */
+  otherIdes: string[];
+  /** Set when Claude Code is present and its files were synced. */
+  claudeCode?: { configPath: string; skillPath: string; configUpdated: boolean };
+  /** Non-fatal problem syncing Claude Code (IDE install still succeeded). */
+  claudeCodeError?: string;
 }
 
 export async function registerAiTools(): Promise<RegisterResult> {
@@ -337,20 +501,42 @@ export async function registerAiTools(): Promise<RegisterResult> {
   const ide = detectIde();
   const credentialsMcp = await startCredentialsMcpServer();
 
-  if (ide.kind === "cursor") {
-    writeCursorMcp(
-      ide.mcpPath,
-      cursorMcpEntry(serverUrl, clientId, secretKey, credentialsMcp.url, credentialsMcp.token)
-    );
-  } else {
-    writeVsCodeMcp(
-      ide.mcpPath,
-      vscodeMcpEntry(serverUrl, clientId, secretKey, credentialsMcp.url, credentialsMcp.token)
-    );
+  const others: string[] = [];
+  for (const target of allIdeTargets()) {
+    if (target.kind === "cursor") {
+      writeCursorMcp(
+        target.mcpPath,
+        cursorMcpEntry(serverUrl, clientId, secretKey, credentialsMcp.url, credentialsMcp.token)
+      );
+    } else {
+      writeVsCodeMcp(
+        target.mcpPath,
+        vscodeMcpEntry(serverUrl, clientId, secretKey, credentialsMcp.url, credentialsMcp.token)
+      );
+    }
+    fs.mkdirSync(path.dirname(target.skillPath), { recursive: true });
+    fs.writeFileSync(target.skillPath, skillContent(serverUrl), "utf-8");
+    if (target.mcpPath !== ide.mcpPath) {
+      others.push(target.label);
+    }
   }
 
-  fs.mkdirSync(path.dirname(ide.skillPath), { recursive: true });
-  fs.writeFileSync(ide.skillPath, skillContent(serverUrl), "utf-8");
+  let claudeCode: RegisterResult["claudeCode"];
+  let claudeCodeError: string | undefined;
+  if (claudeCodeInstalled()) {
+    const cc = claudeCodeTarget();
+    try {
+      const configUpdated = writeClaudeCodeMcp(
+        cc.configPath,
+        claudeCodeMcpEntry(serverUrl, clientId, secretKey, credentialsMcp.url, credentialsMcp.token)
+      );
+      fs.mkdirSync(path.dirname(cc.skillPath), { recursive: true });
+      fs.writeFileSync(cc.skillPath, skillContent(serverUrl), "utf-8");
+      claudeCode = { ...cc, configUpdated };
+    } catch (err) {
+      claudeCodeError = err instanceof Error ? err.message : String(err);
+    }
+  }
 
   return {
     mcpUpdated: true,
@@ -359,6 +545,9 @@ export async function registerAiTools(): Promise<RegisterResult> {
     skillPath: ide.skillPath,
     ide: ide.kind,
     ideLabel: ide.label,
+    otherIdes: others,
+    claudeCode,
+    claudeCodeError,
   };
 }
 
@@ -370,14 +559,21 @@ export interface UnregisterResult {
 
 export function unregisterAiTools(): UnregisterResult {
   const ide = detectIde();
-  const rootKey = ide.kind === "cursor" ? "mcpServers" : "servers";
-  const mcpRemoved = removeMcpKeys(ide.mcpPath, rootKey);
+  const cc = claudeCodeTarget();
+  const targets = allIdeTargets();
+  let mcpRemoved = removeClaudeCodeMcp(cc.configPath);
+  for (const t of targets) {
+    if (removeMcpKeys(t.mcpPath, t.kind === "cursor" ? "mcpServers" : "servers")) {
+      mcpRemoved = true;
+    }
+  }
 
   let skillRemoved = false;
-  const skillDir = path.dirname(ide.skillPath);
-  if (fs.existsSync(skillDir)) {
-    fs.rmSync(skillDir, { recursive: true, force: true });
-    skillRemoved = true;
+  for (const skillDir of [...targets.map((t) => path.dirname(t.skillPath)), path.dirname(cc.skillPath)]) {
+    if (fs.existsSync(skillDir)) {
+      fs.rmSync(skillDir, { recursive: true, force: true });
+      skillRemoved = true;
+    }
   }
 
   return { mcpRemoved, skillRemoved, ideLabel: ide.label };

@@ -23,6 +23,7 @@ import {
 } from "./api";
 import { generateAndUpload } from "./generate";
 import {
+  canRegisterAiTools,
   registerAiTools,
   unregisterAiTools,
   syncAiToolsSilently,
@@ -901,7 +902,13 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
-  void syncAiToolsIfEnabled(context);
+  // Activated on startup: start the local credentials MCP server once, then
+  // refresh every MCP config (VS Code, Cursor, Claude Code) with its port and
+  // token. Without Client Id / Secret Key this window cannot decrypt anything,
+  // so it does not host the server; saving settings later triggers the sync.
+  if (!canRegisterAiTools()) {
+    return;
+  }
   void startCredentialsMcpServer()
     .then(() => syncAiToolsIfEnabled(context))
     .catch((err) => {
@@ -929,8 +936,12 @@ async function syncAiToolsIfEnabled(context: vscode.ExtensionContext): Promise<v
 async function runRegisterAiTools(): Promise<boolean> {
   try {
     const res = await registerAiTools();
+    if (res.claudeCodeError) {
+      vscode.window.showWarningMessage(`Anamnesis: Claude Code MCP config not updated: ${res.claudeCodeError}`);
+    }
+    const targets = [res.ideLabel, ...res.otherIdes, ...(res.claudeCode ? ["Claude Code"] : [])].join(", ");
     const reload = await vscode.window.showInformationMessage(
-      `Anamnesis: MCP and skill installed for ${res.ideLabel}. Reload the window so the IDE picks them up.`,
+      `Anamnesis: MCP and skill installed for ${targets}. Reload the window so the IDE picks them up (in Claude Code, run /mcp to reconnect).`,
       "Reload Window"
     );
     if (reload === "Reload Window") {

@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { testConnection } from "./api";
 import {
   AI_TOOLS_DISABLED_KEY,
+  claudeCodeTarget,
   detectIde,
   registerAiTools,
 } from "./aiTools";
@@ -77,6 +78,8 @@ export class SettingsPanel {
       ideKind: ide.kind,
       mcpPath: ide.mcpPath,
       skillPath: ide.skillPath,
+      claudeMcpPath: claudeCodeTarget().configPath,
+      claudeSkillPath: claudeCodeTarget().skillPath,
     });
   }
 
@@ -145,12 +148,16 @@ export class SettingsPanel {
         this._panel.webview.postMessage({
           type: "installResult",
           ok: true,
-          ideLabel: res.ideLabel,
+          ideLabel: [res.ideLabel, ...res.otherIdes].join(", "),
           mcpPath: res.mcpPath,
           skillPath: res.skillPath,
+          claudeMcpPath: res.claudeCode?.configPath,
+          claudeSkillPath: res.claudeCode?.skillPath,
+          claudeError: res.claudeCodeError,
         });
+        const targets = [res.ideLabel, ...res.otherIdes, ...(res.claudeCode ? ["Claude Code"] : [])].join(", ");
         const reload = await vscode.window.showInformationMessage(
-          `Anamnesis: MCP and skill installed for ${res.ideLabel}. Reload the window so the IDE picks them up.`,
+          `Anamnesis: MCP and skill installed for ${targets}. Reload the window so the IDE picks them up (in Claude Code, run /mcp to reconnect).`,
           "Reload Window"
         );
         if (reload === "Reload Window") {
@@ -405,9 +412,11 @@ export class SettingsPanel {
           if (ideHint) {
             ideHint.textContent = msg.ideLabel
               ? "Detected IDE: " + msg.ideLabel +
-                ". Install MCP & Skill writes only for this editor." +
+                ". Install MCP & Skill writes for this editor, the other IDE (VS Code / Cursor) if installed, and Claude Code if present." +
                 (msg.mcpPath ? " MCP: " + msg.mcpPath + "." : "") +
-                (msg.skillPath ? " Skill: " + msg.skillPath + "." : "")
+                (msg.skillPath ? " Skill: " + msg.skillPath + "." : "") +
+                (msg.claudeMcpPath ? " Claude Code MCP: " + msg.claudeMcpPath + "." : "") +
+                (msg.claudeSkillPath ? " Claude Code skill: " + msg.claudeSkillPath + "." : "")
               : "";
           }
         } else if (msg.type === "testResult") {
@@ -434,6 +443,11 @@ export class SettingsPanel {
               "Installed MCP and Skill for " + escapeHtml(msg.ideLabel) +
                 ".<br>MCP: " + escapeHtml(msg.mcpPath) +
                 "<br>Skill: " + escapeHtml(msg.skillPath) +
+                (msg.claudeMcpPath
+                  ? "<br>Claude Code MCP: " + escapeHtml(msg.claudeMcpPath) +
+                    "<br>Claude Code skill: " + escapeHtml(msg.claudeSkillPath)
+                  : "") +
+                (msg.claudeError ? "<br>Claude Code not updated: " + escapeHtml(msg.claudeError) : "") +
                 "<br>Reload the window if the agent does not see the tools yet."
             );
           } else {

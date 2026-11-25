@@ -32,6 +32,7 @@
     "Other"
   ],
   "activationEvents": [
+    "onStartupFinished",
     "onView:anamnesis.projects",
     "onView:anamnesis.projectPrompts",
     "onView:anamnesis.aiCredentials",
