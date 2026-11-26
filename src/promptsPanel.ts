@@ -4,6 +4,7 @@ import {
   createPrompt,
   updatePrompt,
   deletePromptEntry,
+  isLocalId,
 } from "./api";
 
 export class PromptsPanel {
@@ -102,14 +103,17 @@ export class PromptsPanel {
       }
       try {
         this._panel.webview.postMessage({ type: "saving", mode: "create" });
-        await createPrompt(this._projectName, {
+        const created = await createPrompt(this._projectName, {
           title,
           prompt,
           promptParameters,
           skipAiGeneration,
         });
         vscode.window.showInformationMessage(
-          skipAiGeneration
+          isLocalId(created._id)
+            ? `Anamnesis: prompt "${title}" saved on this machine (local mode).` +
+              (skipAiGeneration ? "" : " The AI-improved version is generated after it uploads.")
+            : skipAiGeneration
             ? `Anamnesis: prompt "${title}" saved without AI generation.`
             : `Anamnesis: prompt "${title}" created and queued for AI improvement.`
         );
@@ -143,7 +147,9 @@ export class PromptsPanel {
           validateWithAi: !skipAiGeneration,
         });
         vscode.window.showInformationMessage(
-          skipAiGeneration
+          isLocalId(id)
+            ? `Anamnesis: prompt "${title}" updated on this machine (local mode).`
+            : skipAiGeneration
             ? `Anamnesis: prompt "${title}" updated without AI generation.`
             : `Anamnesis: prompt "${title}" updated and queued for AI improvement.`
         );
@@ -620,7 +626,11 @@ export class PromptsPanel {
           if (viewOriginal) viewOriginal.innerHTML = mdOrText(row.prompt);
           var status = String(row.status || "");
           if (viewAi) {
-            if (status === "processing" || row.inQueue) {
+            if (String(row._id || "").indexOf("local-") === 0) {
+              viewAi.innerHTML = '<p class="cell-empty">' + (row.wantAi
+                ? "Saved on this machine (local mode). The AI-improved prompt is generated after it uploads to Anamnesis Cloud."
+                : "Saved on this machine (local mode) without AI generation.") + "</p>";
+            } else if (status === "processing" || row.inQueue) {
               viewAi.innerHTML = '<p class="cell-empty">AI generation is still processing. Refresh to check.</p>';
             } else if (status === "failed") {
               viewAi.innerHTML = '<p class="cell-empty">' + escapeHtml(row.aiError || "AI processing failed.") + "</p>";
@@ -715,9 +725,10 @@ export class PromptsPanel {
         tbody.innerHTML = sorted.map((row) => {
           const id = String(row._id ?? row.id ?? "");
           const title = escapeHtml(row.title || "");
-          const status = String(row.status || "processing");
-          const precision = row.precision != null ? Number(row.precision).toFixed(1) : "—";
-          const queueHint = row.inQueue ? " (queued)" : "";
+          const isLocal = id.indexOf("local-") === 0;
+          const status = isLocal ? "local" : String(row.status || "processing");
+          const precision = isLocal ? "—" : row.precision != null ? Number(row.precision).toFixed(1) : "—";
+          const queueHint = isLocal ? " (not uploaded yet)" : row.inQueue ? " (queued)" : "";
           return '<tr data-id="' + escapeHtml(id) + '">' +
             '<td class="col-title">' + title + '</td>' +
             '<td class="col-prompt">' + renderPromptCell(id, "prompt", row.prompt) + '</td>' +

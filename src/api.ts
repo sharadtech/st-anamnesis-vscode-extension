@@ -1,315 +1,180 @@
-import * as vscode from "vscode";
+/**
+ * API used by the UI, MCP servers and graph generation. Every call is routed
+ * to Anamnesis Cloud (cloudApi.ts) or to the local store (localStore.ts):
+ *
+ *  - local mode (no credentials / unreachable / rejected)  -> local store
+ *  - cloud mode                                            -> cloud; on a network
+ *    error the extension switches to local mode and the call is served locally,
+ *    so nothing typed by the user is lost
+ *  - ids starting with "local-" always go to the local store (items waiting
+ *    for sync, or skipped during a sync conflict)
+ *
+ * Lists in cloud mode also include local items that have not been uploaded.
+ */
+import * as cloud from "./cloudApi";
+import * as local from "./localStore";
+import { isLocalId } from "./localStore";
+import { isLocalMode, markOffline, modeReady } from "./mode";
+import { reencryptFor } from "./credentialsCrypto";
+import type {
+  AiContextRow,
+  CipherBlob,
+  CredentialSetDetail,
+  CredentialSetRow,
+  GraphData,
+  GraphStats,
+  ProjectMeta,
+  PromptRow,
+  SerializedGraphPayload,
+} from "./cloudApi";
 
-export interface GraphNode {
-  id: string;
-  label?: string;
-  kind?: string;
-  source_file?: string;
-  loc?: string;
-  community?: string | number | null;
-  [key: string]: unknown;
-}
+export type {
+  AiContextRow,
+  AuthUser,
+  CipherBlob,
+  CredentialSetDetail,
+  CredentialSetRow,
+  GraphData,
+  GraphEdge,
+  GraphNode,
+  GraphStats,
+  ProjectMeta,
+  PromptRow,
+  SerializedGraphPayload,
+} from "./cloudApi";
+export { config, fetchAuthUser, isNetworkError, projectTagsOf, testConnection } from "./cloudApi";
+export { isLocalId } from "./localStore";
 
-export interface GraphEdge {
-  source: string;
-  target: string;
-  relation?: string;
-  confidence?: string;
-  [key: string]: unknown;
-}
-
-export interface GraphData {
-  tag: string;
-  nodes: GraphNode[];
-  edges: GraphEdge[];
-}
-
-export interface ProjectMeta {
-  project_name: string;
-  nodes?: number;
-  edges?: number;
-  communities?: number;
-  graph_tag?: string;
-  built_at_commit?: string | null;
-  shared?: boolean;
-  ownerUserId?: string;
-  [key: string]: unknown;
-}
-
-export interface AuthUser {
-  companyId: string;
-  userId: string;
-  keyId?: string;
-  keyName: string;
-  role: string;
-  email?: string;
-  firstName?: string;
-  lastName?: string;
-}
-
-export interface CipherBlob {
-  v: number;
-  alg: string;
-  kdf: string;
-  kdfSalt: string;
-  keyId?: string;
-  keyName?: string;
-  wrappedDek: string;
-  wrapIv: string;
-  wrapTag: string;
-  iv: string;
-  tag: string;
-  data: string;
-}
-
-export interface CredentialSetRow {
-  _id: string;
-  name: string;
-  description?: string;
-  projectTags?: string[];
-  projectTag?: string;
-  keyCount?: number;
-  locked?: boolean;
-  createdAt?: string;
-  updatedAt?: string;
-}
-
-export function projectTagsOf(row: {
-  projectTags?: string[];
-  projectTag?: string;
-}): string[] {
-  const fromArray = Array.isArray(row.projectTags)
-    ? row.projectTags.map((tag) => String(tag ?? "").trim()).filter(Boolean)
-    : [];
-  const legacy = String(row.projectTag ?? "").trim();
-  return [...new Set(legacy ? [...fromArray, legacy] : fromArray)];
-}
-
-export interface CredentialSetDetail extends CredentialSetRow {
-  cipher: CipherBlob;
-}
-
-export interface PromptRow {
-  _id: string;
-  title: string;
-  prompt: string;
-  promptParameters?: string;
-  aiCreatedPrompt: string;
-  precision: number;
-  status: "processing" | "ready" | "failed";
-  createdAt?: string;
-  updatedAt?: string;
-  inQueue?: boolean;
-  aiError?: string;
-  [key: string]: unknown;
-}
-
-export interface GraphStats {
-  tag: string;
-  nodes: number;
-  edges: number;
-  communities: number;
-  built_at_commit: string | null;
-}
-
-export interface SerializedGraphPayload {
-  version?: number;
-  companyId?: string;
-  builtAt?: string;
-  nodes: unknown[];
-  edges: unknown[];
-}
-
-interface ApiEnvelope<T = unknown> {
-  status?: number;
-  message?: string;
-  data?: T;
-}
-
-function config(): { serverUrl: string; clientId: string; secretKey: string; defaultTag: string } {
-  const cfg = vscode.workspace.getConfiguration("anamnesis");
-  const serverUrl = (cfg.get<string>("serverUrl") || "").replace(/\/+$/, "");
-  const clientId = (cfg.get<string>("clientId") || "").trim();
-  const secretKey = (cfg.get<string>("secretKey") || "").trim();
-  const defaultTag = (cfg.get<string>("defaultTag") || "default").trim();
-  return { serverUrl, clientId, secretKey, defaultTag };
-}
-
-function authHeaders(clientId: string, secretKey: string): Record<string, string> {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
-  if (clientId) {
-    headers["X-Client-Id"] = clientId;
+/**
+ * Run `cloudCall` unless in local mode. A network failure flips to local mode
+ * and runs `localCall` instead.
+ */
+async function route<T>(cloudCall: () => Promise<T>, localCall: () => T | Promise<T>): Promise<T> {
+  await modeReady();
+  if (isLocalMode()) {
+    return localCall();
   }
-  if (secretKey) {
-    headers["X-Secret-Key"] = secretKey;
-  }
-  return headers;
-}
-
-function requireConfig(): { serverUrl: string; clientId: string; secretKey: string } {
-  const { serverUrl, clientId, secretKey } = config();
-  if (!serverUrl) {
-    throw new Error("No API Base URL configured. Set it via Anamnesis Settings.");
-  }
-  if (!clientId || !secretKey) {
-    throw new Error("Client Id and Secret Key are required. Configure them in Anamnesis Settings.");
-  }
-  return { serverUrl, clientId, secretKey };
-}
-
-function htmlToSnippet(raw: string): string {
-  return raw.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 180);
-}
-
-async function parseEnvelope<T>(res: Response, payloadBytes?: number): Promise<T> {
-  const raw = await res.text();
-  let body: ApiEnvelope<T> = {};
-  if (raw) {
-    try {
-      body = JSON.parse(raw) as ApiEnvelope<T>;
-    } catch {
-      /* nginx/html errors are not JSON */
-    }
-  }
-  if (!res.ok) {
-    if (res.status === 413) {
-      const size =
-        payloadBytes !== undefined
-          ? ` This request was ${(payloadBytes / 1024 / 1024).toFixed(1)} MB.`
-          : "";
-      throw new Error(
-        `Upload rejected (HTTP 413 Request Entity Too Large).${size} ` +
-          "The API gateway nginx limit is still 1 MB; raise client_max_body_size " +
-          "on apigateway.anamnesis.cloud to 100m (Express already allows 100 MB) and reload nginx."
-      );
-    }
-    throw new Error(
-      body.message || htmlToSnippet(raw) || res.statusText || `HTTP ${res.status}`
-    );
-  }
-  if (body.data !== undefined) {
-    return body.data;
-  }
-  return body as unknown as T;
-}
-
-const FETCH_TIMEOUT_MS = 120_000;
-
-async function fetchTimed(url: string, init: RequestInit): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    return await cloudCall();
   } catch (err) {
-    if (controller.signal.aborted) {
-      throw new Error(`Request timed out after ${FETCH_TIMEOUT_MS / 1000}s: ${url}`);
+    if (cloud.isNetworkError(err)) {
+      markOffline(err instanceof Error ? err.message : String(err));
+      return localCall();
     }
     throw err;
-  } finally {
-    clearTimeout(timer);
   }
 }
 
-async function fetchJson<T>(path: string): Promise<T> {
-  const { serverUrl, clientId, secretKey } = requireConfig();
-  const url = `${serverUrl}${path}`;
-  const headers = authHeaders(clientId, secretKey);
-  const res = await fetchTimed(url, { headers });
-  return parseEnvelope<T>(res);
+/** Cloud list plus local rows that are not yet uploaded. */
+async function merged<T>(cloudCall: () => Promise<T[]>, localCall: () => T[]): Promise<T[]> {
+  let usedLocal = false;
+  const rows = await route(cloudCall, () => {
+    usedLocal = true;
+    return localCall();
+  });
+  return usedLocal ? rows : [...rows, ...localCall()];
 }
 
-async function fetchWithMethod<T>(
-  path: string,
-  method: string,
-  body?: unknown
-): Promise<T> {
-  const { serverUrl, clientId, secretKey } = requireConfig();
-  const url = `${serverUrl}${path}`;
-  const headers = authHeaders(clientId, secretKey);
-  const encoded = body !== undefined ? JSON.stringify(body) : undefined;
-  const res = await fetchTimed(url, {
-    method,
-    headers,
-    body: encoded,
-  });
-  return parseEnvelope<T>(res, encoded ? Buffer.byteLength(encoded) : undefined);
+// ---------------------------------------------------------------- graphs
+
+export async function fetchProjects(): Promise<{ projects: ProjectMeta[]; count: number }> {
+  const projects = await merged(
+    async () => (await cloud.fetchProjects()).projects,
+    () => local.listProjects()
+  );
+  return { projects, count: projects.length };
 }
 
 export async function fetchGraph(tag?: string): Promise<GraphData> {
-  const { defaultTag } = config();
-  const projectName = encodeURIComponent(tag || defaultTag);
-  return fetchJson<GraphData>(`/anamnesis-vscode-ext/graphs/${projectName}`);
+  const name = tag || cloud.config().defaultTag;
+  return route(
+    async () => {
+      try {
+        return await cloud.fetchGraph(name);
+      } catch (err) {
+        // Cloud has no such project, but a not-yet-uploaded local copy exists.
+        if (!cloud.isNetworkError(err) && local.hasGraph(name)) {
+          return local.getGraph(name);
+        }
+        throw err;
+      }
+    },
+    () => local.getGraph(name)
+  );
 }
 
 export async function fetchStats(tag?: string): Promise<GraphStats> {
-  const { defaultTag } = config();
-  const projectName = encodeURIComponent(tag || defaultTag);
-  return fetchJson<GraphStats>(
-    `/anamnesis-vscode-ext/graphs/${projectName}?format=stats`
+  const name = tag || cloud.config().defaultTag;
+  return route(
+    async () => {
+      try {
+        return await cloud.fetchStats(name);
+      } catch (err) {
+        if (!cloud.isNetworkError(err) && local.hasGraph(name)) {
+          return local.getStats(name);
+        }
+        throw err;
+      }
+    },
+    () => local.getStats(name)
   );
 }
 
-export async function fetchProjects(): Promise<{ projects: ProjectMeta[]; count: number }> {
-  return fetchJson<{ projects: ProjectMeta[]; count: number }>(
-    `/anamnesis-vscode-ext/projects`
-  );
-}
-
-/** Returns the authenticated user profile (Client Id + Secret Key). */
-export async function fetchAuthUser(): Promise<AuthUser> {
-  const { serverUrl, clientId, secretKey } = requireConfig();
-  const url = `${serverUrl}/anamnesis-vscode-ext/authenticate`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ clientId, secretKey }),
-  });
-  return parseEnvelope<AuthUser>(res);
-}
-
-export async function createRepo(projectName: string): Promise<unknown> {
-  return fetchWithMethod(`/anamnesis-vscode-ext/repos`, "POST", { projectName });
-}
-
-export async function uploadGraph(
+/** Save a freshly generated graph. Returns where it was stored. */
+export async function saveGraph(
   projectName: string,
   graph: SerializedGraphPayload
-): Promise<unknown> {
-  return fetchWithMethod(
-    `/anamnesis-vscode-ext/graphs/${encodeURIComponent(projectName)}`,
-    "PUT",
-    graph
+): Promise<"cloud" | "local"> {
+  return route<"cloud" | "local">(
+    async () => {
+      await cloud.createRepo(projectName);
+      await cloud.uploadGraph(projectName, graph);
+      // A fresh cloud upload supersedes any copy waiting for sync.
+      local.deleteGraph(projectName);
+      return "cloud";
+    },
+    () => {
+      local.saveGraph(projectName, graph);
+      return "local";
+    }
   );
 }
 
-export async function deleteGraph(
-  tag: string
-): Promise<{ ok: boolean; tag: string; deleted: string[] }> {
-  return fetchWithMethod(
-    `/anamnesis-vscode-ext/graphs/${encodeURIComponent(tag)}`,
-    "DELETE"
+export async function deleteGraph(tag: string): Promise<{ ok: boolean; tag: string; deleted: string[] }> {
+  const localDeleted = () => local.deleteGraph(tag);
+  return route(
+    async () => {
+      let res: { ok: boolean; tag: string; deleted: string[] } | undefined;
+      try {
+        res = await cloud.deleteGraph(tag);
+      } catch (err) {
+        if (cloud.isNetworkError(err) || !local.hasGraph(tag)) {
+          throw err;
+        }
+      }
+      const deleted = [...(res?.deleted ?? []), ...localDeleted()];
+      return { ok: true, tag, deleted };
+    },
+    () => ({ ok: true, tag, deleted: localDeleted() })
   );
 }
+
+// ---------------------------------------------------------------- prompts
 
 export async function fetchPrompts(projectName: string): Promise<PromptRow[]> {
-  const encoded = encodeURIComponent(projectName);
-  const rows = await fetchJson<PromptRow[]>(
-    `/anamnesis-vscode-ext/projects/${encoded}/prompts`
+  return merged(
+    () => cloud.fetchPrompts(projectName),
+    () => local.listPrompts(projectName)
   );
-  return Array.isArray(rows) ? rows : [];
 }
 
 export async function createPrompt(
   projectName: string,
   body: { title: string; prompt: string; promptParameters?: string; skipAiGeneration?: boolean }
 ): Promise<PromptRow> {
-  const encoded = encodeURIComponent(projectName);
-  return fetchWithMethod<PromptRow>(
-    `/anamnesis-vscode-ext/projects/${encoded}/prompts`,
-    "POST",
-    body
+  return route(
+    () => cloud.createPrompt(projectName, body),
+    () => local.createPrompt(projectName, body)
   );
 }
 
@@ -324,202 +189,122 @@ export async function updatePrompt(
     skipAiGeneration?: boolean;
   }
 ): Promise<PromptRow> {
-  const encodedProject = encodeURIComponent(projectName);
-  const encodedPrompt = encodeURIComponent(promptId);
-  return fetchWithMethod<PromptRow>(
-    `/anamnesis-vscode-ext/projects/${encodedProject}/prompts/${encodedPrompt}`,
-    "PUT",
-    body
-  );
+  if (isLocalId(promptId)) {
+    return local.updatePrompt(projectName, promptId, body);
+  }
+  return cloud.updatePrompt(projectName, promptId, body);
 }
 
 export async function deletePromptEntry(
   projectName: string,
   promptId: string
 ): Promise<{ deleted: boolean }> {
-  const encodedProject = encodeURIComponent(projectName);
-  const encodedPrompt = encodeURIComponent(promptId);
-  return fetchWithMethod<{ deleted: boolean }>(
-    `/anamnesis-vscode-ext/projects/${encodedProject}/prompts/${encodedPrompt}`,
-    "DELETE"
-  );
+  if (isLocalId(promptId)) {
+    return { deleted: local.deletePrompt(projectName, promptId) };
+  }
+  return cloud.deletePromptEntry(projectName, promptId);
 }
 
-export async function fetchCredentialSets(): Promise<CredentialSetRow[]> {
-  const rows = await fetchJson<CredentialSetRow[]>(
-    `/anamnesis-vscode-ext/credentials`
-  );
-  return Array.isArray(rows) ? rows : [];
-}
+// ---------------------------------------------------------------- credentials
 
-export async function fetchCredentialSet(
-  credentialId: string
-): Promise<CredentialSetDetail> {
-  return fetchJson<CredentialSetDetail>(
-    `/anamnesis-vscode-ext/credentials/${encodeURIComponent(credentialId)}`
-  );
-}
-
-export async function createCredentialSet(body: {
+type CredentialBody = {
   name: string;
   description?: string;
   projectTags?: string[];
   keyCount: number;
   cipher: CipherBlob;
-}): Promise<CredentialSetRow> {
-  return fetchWithMethod<CredentialSetRow>(
-    `/anamnesis-vscode-ext/credentials`,
-    "POST",
-    body
+};
+
+export async function fetchCredentialSets(): Promise<CredentialSetRow[]> {
+  return merged(
+    () => cloud.fetchCredentialSets(),
+    () => local.listCredentialSets()
+  );
+}
+
+export async function fetchCredentialSet(credentialId: string): Promise<CredentialSetDetail> {
+  if (isLocalId(credentialId)) {
+    return local.getCredentialSet(credentialId);
+  }
+  return cloud.fetchCredentialSet(credentialId);
+}
+
+export async function createCredentialSet(body: CredentialBody): Promise<CredentialSetRow> {
+  return route(
+    async () => cloud.createCredentialSet({ ...body, cipher: await reencryptFor("cloud", body.cipher) }),
+    async () => local.createCredentialSet({ ...body, cipher: await reencryptFor("local", body.cipher) })
   );
 }
 
 export async function updateCredentialSet(
   credentialId: string,
-  body: {
-    name: string;
-    description?: string;
-    projectTags?: string[];
-    keyCount: number;
-    cipher: CipherBlob;
-  }
+  body: CredentialBody
 ): Promise<CredentialSetRow> {
-  return fetchWithMethod<CredentialSetRow>(
-    `/anamnesis-vscode-ext/credentials/${encodeURIComponent(credentialId)}`,
-    "PUT",
-    body
-  );
+  if (isLocalId(credentialId)) {
+    return local.updateCredentialSet(credentialId, {
+      ...body,
+      cipher: await reencryptFor("local", body.cipher),
+    });
+  }
+  return cloud.updateCredentialSet(credentialId, {
+    ...body,
+    cipher: await reencryptFor("cloud", body.cipher),
+  });
 }
 
 export async function setCredentialSetLocked(
   credentialId: string,
   locked: boolean
 ): Promise<CredentialSetRow> {
-  return fetchWithMethod<CredentialSetRow>(
-    `/anamnesis-vscode-ext/credentials/${encodeURIComponent(credentialId)}/lock`,
-    "PATCH",
-    { locked }
-  );
+  if (isLocalId(credentialId)) {
+    return local.setCredentialSetLocked(credentialId, locked);
+  }
+  return cloud.setCredentialSetLocked(credentialId, locked);
 }
 
-export async function deleteCredentialSet(
-  credentialId: string
-): Promise<{ deleted: boolean }> {
-  return fetchWithMethod<{ deleted: boolean }>(
-    `/anamnesis-vscode-ext/credentials/${encodeURIComponent(credentialId)}`,
-    "DELETE"
-  );
+export async function deleteCredentialSet(credentialId: string): Promise<{ deleted: boolean }> {
+  if (isLocalId(credentialId)) {
+    return { deleted: local.deleteCredentialSet(credentialId) };
+  }
+  return cloud.deleteCredentialSet(credentialId);
 }
 
-export interface AiContextRow {
-  _id: string;
-  projectName: string;
-  context: string;
-  updatedAt?: string;
-}
+// ---------------------------------------------------------------- AI Context
 
 export async function fetchAiContexts(): Promise<AiContextRow[]> {
-  const rows = await fetchJson<AiContextRow[]>(`/anamnesis-vscode-ext/ai-context`);
-  return Array.isArray(rows) ? rows : [];
+  return merged(
+    () => cloud.fetchAiContexts(),
+    () => local.listAiContexts()
+  );
 }
 
 export async function fetchAiContext(id: string): Promise<AiContextRow> {
-  return fetchJson<AiContextRow>(
-    `/anamnesis-vscode-ext/ai-context/${encodeURIComponent(id)}`
-  );
+  if (isLocalId(id)) {
+    return local.getAiContext(id);
+  }
+  return cloud.fetchAiContext(id);
 }
 
-export async function saveAiContext(body: {
-  projectName: string;
-  context: string;
-}): Promise<AiContextRow> {
-  return fetchWithMethod<AiContextRow>(`/anamnesis-vscode-ext/ai-context`, "POST", body);
+export async function saveAiContext(body: { projectName: string; context: string }): Promise<AiContextRow> {
+  return route(
+    () => cloud.saveAiContext(body),
+    () => local.saveAiContext(body)
+  );
 }
 
 export async function updateAiContext(
   id: string,
   body: { projectName: string; context: string }
 ): Promise<AiContextRow> {
-  return fetchWithMethod<AiContextRow>(
-    `/anamnesis-vscode-ext/ai-context/${encodeURIComponent(id)}`,
-    "PUT",
-    body
-  );
+  if (isLocalId(id)) {
+    return local.updateAiContext(id, body);
+  }
+  return cloud.updateAiContext(id, body);
 }
 
 export async function deleteAiContext(id: string): Promise<{ deleted: boolean }> {
-  return fetchWithMethod<{ deleted: boolean }>(
-    `/anamnesis-vscode-ext/ai-context/${encodeURIComponent(id)}`,
-    "DELETE"
-  );
+  if (isLocalId(id)) {
+    return { deleted: local.deleteAiContext(id) };
+  }
+  return cloud.deleteAiContext(id);
 }
-
-interface ApiEnvelopeAuth {
-  status?: number;
-  message?: string;
-  data?: AuthUser;
-}
-
-/**
- * Authenticates against st-ck-server using Client Id + Secret Key.
- */
-export async function testConnection(
-  serverUrl?: string,
-  clientId?: string,
-  secretKey?: string
-): Promise<{ ok: boolean; status?: number; detail: string; latencyMs?: number }> {
-  const rawUrl = (serverUrl ?? config().serverUrl).trim();
-  const cid = (clientId ?? config().clientId).trim();
-  const skey = (secretKey ?? config().secretKey).trim();
-
-  if (!rawUrl) {
-    return { ok: false, detail: "No API Base URL provided. Enter the server URL first." };
-  }
-  if (!cid) {
-    return { ok: false, detail: "Client Id is required. Copy it from Anamnesis Settings → View Credentials." };
-  }
-  if (!skey) {
-    return { ok: false, detail: "Secret Key is required. Copy it from Anamnesis Settings → View Credentials." };
-  }
-
-  const url = rawUrl.replace(/\/+$/, "");
-  const started = Date.now();
-  try {
-    const res = await fetch(`${url}/anamnesis-vscode-ext/authenticate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ clientId: cid, secretKey: skey }),
-    });
-    const latencyMs = Date.now() - started;
-    const body = (await res.json().catch(() => ({}))) as ApiEnvelopeAuth;
-
-    if (res.ok && body.data) {
-      const role = body.data.role ? `, role: ${body.data.role}` : "";
-      const keyName = body.data.keyName ? `, key: ${body.data.keyName}` : "";
-      const name = [body.data.firstName, body.data.lastName].filter(Boolean).join(" ");
-      const who = name || body.data.email || body.data.userId || "";
-      const whoPart = who ? ` as ${who}` : "";
-      return {
-        ok: true,
-        status: res.status,
-        latencyMs,
-        detail: `Authenticated${whoPart} (${res.status}) ${latencyMs}ms${keyName}${role}`,
-      };
-    }
-
-    const message = body.message || res.statusText || "Authentication failed";
-    return {
-      ok: false,
-      status: res.status,
-      latencyMs,
-      detail: `HTTP ${res.status}: ${message}`,
-    };
-  } catch (err) {
-    return {
-      ok: false,
-      detail: `Could not reach ${url}/anamnesis-vscode-ext/authenticate: ${err instanceof Error ? err.message : String(err)}`,
-    };
-  }
-}
-
-export { config };

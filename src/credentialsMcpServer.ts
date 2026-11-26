@@ -6,14 +6,33 @@ import * as path from "path";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { fetchCredentialSet, fetchCredentialSets, projectTagsOf } from "./api";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { config, fetchCredentialSet, fetchCredentialSets, isNetworkError, projectTagsOf } from "./api";
 import { decryptCredentialSet, getEncryptionContext } from "./credentialsCrypto";
+import { LOCAL_GRAPH_TOOLS } from "./graphQuery";
+import { isLocalMode, markOffline, modeReady } from "./mode";
+
+/**
+ * Local MCP gateway, bound to 127.0.0.1 and protected by a bearer token:
+ *
+ *   /mcp        anamnesis-credentials  list/decrypt credential sets (cloud or local store)
+ *   /graph/mcp  anamnesis              graph + AI Context tools. Cloud mode: each call is
+ *               relayed through an MCP client session to Anamnesis Cloud. Local mode:
+ *               answered from ~/.anamnesis/local. The mode is checked per request, so
+ *               agents never need to reconnect when connectivity changes.
+ */
 
 const DEFAULT_PORT = 17841;
 const PORT_RANGE = 20;
 
 export interface CredentialsMcpInfo {
+  /** anamnesis-credentials endpoint. */
   url: string;
+  /** anamnesis (graph + AI Context) gateway endpoint. */
+  graphUrl: string;
   token: string;
   port: number;
 }
@@ -94,6 +113,103 @@ function createServer(): McpServer {
   return server;
 }
 
+// ------------------------------------------------------------- graph gateway
+
+let cloudClient: { key: string; client: Client } | undefined;
+
+async function getCloudClient(): Promise<Client> {
+  const { serverUrl, clientId, secretKey } = config();
+  const key = `${serverUrl}|${clientId}|${secretKey}`;
+  if (cloudClient && cloudClient.key === key) {
+    return cloudClient.client;
+  }
+  await resetCloudClient();
+  const client = new Client({ name: "anamnesis-local-gateway", version: "1.0.0" });
+  const transport = new StreamableHTTPClientTransport(new URL(`${serverUrl}/anamnesis-vscode-ext/mcp`), {
+    requestInit: { headers: { "X-Client-Id": clientId, "X-Secret-Key": secretKey } },
+  });
+  await client.connect(transport);
+  cloudClient = { key, client };
+  return client;
+}
+
+async function resetCloudClient(): Promise<void> {
+  const current = cloudClient;
+  cloudClient = undefined;
+  try {
+    await current?.client.close();
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * Run `fn` against the cloud MCP server. Retries once with a fresh session
+ * (sessions expire); a network failure switches to local mode and returns
+ * undefined so the caller answers locally.
+ */
+async function viaCloud<T>(fn: (client: Client) => Promise<T>): Promise<T | undefined> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await fn(await getCloudClient());
+    } catch (err) {
+      await resetCloudClient();
+      if (isNetworkError(err)) {
+        markOffline(err instanceof Error ? err.message : String(err));
+        return undefined;
+      }
+      if (attempt === 1) {
+        throw err;
+      }
+    }
+  }
+  return undefined;
+}
+
+function localToolList() {
+  return {
+    tools: LOCAL_GRAPH_TOOLS.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })),
+  };
+}
+
+function runLocalTool(name: string, args: Record<string, unknown>) {
+  const tool = LOCAL_GRAPH_TOOLS.find((t) => t.name === name);
+  if (!tool) {
+    return { isError: true, content: [{ type: "text" as const, text: `Tool "${name}" is not available in local mode.` }] };
+  }
+  try {
+    return textResult(tool.run(args));
+  } catch (err) {
+    return { isError: true, content: [{ type: "text" as const, text: err instanceof Error ? err.message : String(err) }] };
+  }
+}
+
+function createGraphServer(): Server {
+  const server = new Server(
+    { name: "anamnesis", version: "1.0.0" },
+    { capabilities: { tools: {} } }
+  );
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    await modeReady();
+    if (!isLocalMode()) {
+      const res = await viaCloud((c) => c.listTools());
+      if (res) return res;
+    }
+    return localToolList();
+  });
+  server.setRequestHandler(CallToolRequestSchema, async (req) => {
+    const name = req.params.name;
+    const args = (req.params.arguments ?? {}) as Record<string, unknown>;
+    await modeReady();
+    if (!isLocalMode()) {
+      const res = await viaCloud((c) => c.callTool({ name, arguments: args }));
+      if (res) return res;
+    }
+    return runLocalTool(name, args);
+  });
+  return server;
+}
+
 function readBody(req: http.IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -118,8 +234,8 @@ function listen(port: number, token: string): Promise<http.Server> {
   return new Promise((resolve, reject) => {
     const server = http.createServer(async (req, res) => {
       const url = req.url || "/";
-      const path = url.split("?")[0];
-      if (path !== "/mcp" && path !== "/mcp/") {
+      const route = url.split("?")[0].replace(/\/+$/, "");
+      if (route !== "/mcp" && route !== "/graph/mcp") {
         res.writeHead(404).end("Not found");
         return;
       }
@@ -138,7 +254,7 @@ function listen(port: number, token: string): Promise<http.Server> {
       }
       try {
         const body = await readBody(req);
-        const mcp = createServer();
+        const mcp = route === "/graph/mcp" ? createGraphServer() : createServer();
         const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
         res.on("close", () => {
           void transport.close();
@@ -259,7 +375,7 @@ function probeOwnServer(port: number, token: string): Promise<boolean> {
 }
 
 function makeInfo(port: number, token: string): CredentialsMcpInfo {
-  return { port, token, url: `http://127.0.0.1:${port}/mcp` };
+  return { port, token, url: `http://127.0.0.1:${port}/mcp`, graphUrl: `http://127.0.0.1:${port}/graph/mcp` };
 }
 
 /**
@@ -286,9 +402,11 @@ function scheduleTakeover(port: number, token: string): void {
       // Port held by something else; keep waiting.
     }
   }, TAKEOVER_INTERVAL_MS);
+  takeoverTimer.unref?.();
 }
 
 export async function stopCredentialsMcpServer(): Promise<void> {
+  await resetCloudClient();
   if (takeoverTimer) {
     clearInterval(takeoverTimer);
     takeoverTimer = undefined;

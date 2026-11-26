@@ -132,16 +132,8 @@ export class SettingsPanel {
         });
         return;
       }
-      const clientId = this._normalizeStr(msg.clientId);
-      const secretKey = this._normalizeStr(msg.secretKey);
-      if (!clientId || !secretKey) {
-        this._panel.webview.postMessage({
-          type: "installResult",
-          ok: false,
-          detail: "Client Id and Secret Key are required before installing MCP and Skill.",
-        });
-        return;
-      }
+      // Client Id / Secret Key are optional: without them the local MCP gateway
+      // serves graphs, AI Context and credentials from this machine.
       try {
         await this._context.globalState.update(AI_TOOLS_DISABLED_KEY, false);
         const res = await registerAiTools();

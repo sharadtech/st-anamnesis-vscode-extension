@@ -176,7 +176,8 @@ description: Use the Anamnesis knowledge graph (via the "anamnesis" MCP server) 
 # Anamnesis knowledge graph
 
 This workspace has Anamnesis knowledge graphs available through the **anamnesis** MCP
-server (backed by ${serverUrl}). Each graph is a project you created via
+server. It is a local gateway run by the Anamnesis extension: online it relays to
+${serverUrl}; offline it answers from graphs stored on this machine. Each graph is a project you created via
 "Anamnesis: Create Knowledge Graph". Nodes are files/classes/functions/methods; edges
 are \`contains\`, \`imports\`, and \`calls\`.
 
@@ -261,6 +262,17 @@ A locked set opens read-only in the Anamnesis sidebar and cannot be deleted unti
 it is unlocked. Locking does not block these tools: when the user asks for a
 stored set, call \`get_credentials\` as usual.
 
+## Local mode
+
+When the extension has no Client Id / Secret Key, or Anamnesis Cloud is unreachable
+(VPN, offline), the same tools answer from \`~/.anamnesis/local\`:
+
+- Only graphs created on this machine are listed; company-shared graphs are not available.
+- AI Context saved with \`context-save\` is stored locally and uploaded automatically
+  once the cloud is reachable again.
+- Results come from a local graph engine, so their layout may differ slightly from the
+  cloud. Responses include \`"mode": "local"\` where relevant.
+
 ## When to fall back to grep/Read
 
 Only after the graph has oriented you and you need the exact source lines to modify,
@@ -270,24 +282,23 @@ or when the symbol is not yet in the graph (regenerate it with
 }
 
 function cursorMcpEntry(
-  serverUrl: string,
-  clientId: string,
-  secretKey: string,
+  graphUrl: string,
   credentialsUrl: string,
   token: string
 ): Record<string, unknown> {
+  // Both servers are served by the extension's local gateway (127.0.0.1),
+  // which relays to Anamnesis Cloud or answers from the local store.
   return {
     [MCP_SERVER_KEY]: {
-      url: `${serverUrl}/anamnesis-vscode-ext/mcp`,
       transport: "streamable-http",
+      url: graphUrl,
       headers: {
-        "X-Client-Id": clientId,
-        "X-Secret-Key": secretKey,
+        Authorization: `Bearer ${token}`,
       },
     },
     [CREDENTIALS_SERVER_KEY]: {
-      url: credentialsUrl,
       transport: "streamable-http",
+      url: credentialsUrl,
       headers: {
         Authorization: `Bearer ${token}`,
       },
@@ -296,19 +307,18 @@ function cursorMcpEntry(
 }
 
 function vscodeMcpEntry(
-  serverUrl: string,
-  clientId: string,
-  secretKey: string,
+  graphUrl: string,
   credentialsUrl: string,
   token: string
 ): Record<string, unknown> {
+  // Both servers are served by the extension's local gateway (127.0.0.1),
+  // which relays to Anamnesis Cloud or answers from the local store.
   return {
     [MCP_SERVER_KEY]: {
       type: "http",
-      url: `${serverUrl}/anamnesis-vscode-ext/mcp`,
+      url: graphUrl,
       headers: {
-        "X-Client-Id": clientId,
-        "X-Secret-Key": secretKey,
+        Authorization: `Bearer ${token}`,
       },
     },
     [CREDENTIALS_SERVER_KEY]: {
@@ -392,19 +402,18 @@ function claudeCodeInstalled(): boolean {
 }
 
 function claudeCodeMcpEntry(
-  serverUrl: string,
-  clientId: string,
-  secretKey: string,
+  graphUrl: string,
   credentialsUrl: string,
   token: string
 ): Record<string, unknown> {
+  // Both servers are served by the extension's local gateway (127.0.0.1),
+  // which relays to Anamnesis Cloud or answers from the local store.
   return {
     [MCP_SERVER_KEY]: {
       type: "http",
-      url: `${serverUrl}/anamnesis-vscode-ext/mcp`,
+      url: graphUrl,
       headers: {
-        "X-Client-Id": clientId,
-        "X-Secret-Key": secretKey,
+        Authorization: `Bearer ${token}`,
       },
     },
     [CREDENTIALS_SERVER_KEY]: {
@@ -490,13 +499,8 @@ export interface RegisterResult {
 }
 
 export async function registerAiTools(): Promise<RegisterResult> {
-  const { serverUrl, clientId, secretKey } = config();
-  if (!serverUrl) {
-    throw new Error("Set the API Base URL in Anamnesis Settings before installing MCP and Skill.");
-  }
-  if (!clientId || !secretKey) {
-    throw new Error("Set the Client Id and Secret Key in Anamnesis Settings before installing MCP and Skill.");
-  }
+  // No credentials needed: without them the gateway serves the local store.
+  const serverUrl = config().serverUrl || "Anamnesis Cloud";
 
   const ide = detectIde();
   const credentialsMcp = await startCredentialsMcpServer();
@@ -506,12 +510,12 @@ export async function registerAiTools(): Promise<RegisterResult> {
     if (target.kind === "cursor") {
       writeCursorMcp(
         target.mcpPath,
-        cursorMcpEntry(serverUrl, clientId, secretKey, credentialsMcp.url, credentialsMcp.token)
+        cursorMcpEntry(credentialsMcp.graphUrl, credentialsMcp.url, credentialsMcp.token)
       );
     } else {
       writeVsCodeMcp(
         target.mcpPath,
-        vscodeMcpEntry(serverUrl, clientId, secretKey, credentialsMcp.url, credentialsMcp.token)
+        vscodeMcpEntry(credentialsMcp.graphUrl, credentialsMcp.url, credentialsMcp.token)
       );
     }
     fs.mkdirSync(path.dirname(target.skillPath), { recursive: true });
@@ -528,7 +532,7 @@ export async function registerAiTools(): Promise<RegisterResult> {
     try {
       const configUpdated = writeClaudeCodeMcp(
         cc.configPath,
-        claudeCodeMcpEntry(serverUrl, clientId, secretKey, credentialsMcp.url, credentialsMcp.token)
+        claudeCodeMcpEntry(credentialsMcp.graphUrl, credentialsMcp.url, credentialsMcp.token)
       );
       fs.mkdirSync(path.dirname(cc.skillPath), { recursive: true });
       fs.writeFileSync(cc.skillPath, skillContent(serverUrl), "utf-8");
@@ -588,9 +592,9 @@ export function isRegistered(): boolean {
   return !!(mcp.servers && mcp.servers[MCP_SERVER_KEY]);
 }
 
+/** Always true: the local gateway works with or without cloud credentials. */
 export function canRegisterAiTools(): boolean {
-  const { serverUrl, clientId, secretKey } = config();
-  return !!(serverUrl && clientId && secretKey);
+  return true;
 }
 
 /** Register MCP + skill when credentials are configured. No-op if credentials are missing. */

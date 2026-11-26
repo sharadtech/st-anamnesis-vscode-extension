@@ -8,22 +8,32 @@ import { CredentialsViewPanel } from "./credentialsViewPanel";
 import { AiContextPanel } from "./aiContextPanel";
 import {
   fetchProjects,
-  fetchAuthUser,
   deleteGraph,
   fetchCredentialSets,
   deleteCredentialSet,
   setCredentialSetLocked,
   fetchAiContexts,
   deleteAiContext,
-  config,
   AuthUser,
   CredentialSetRow,
   AiContextRow,
+  config,
   projectTagsOf,
+  isLocalId,
 } from "./api";
+import {
+  describeReason,
+  getModeState,
+  initModeMonitor,
+  modeReady,
+  ModeState,
+  onDidChangeMode,
+  probe,
+} from "./mode";
+import { counts as localCounts, isEmpty as localStoreEmpty, localRoot } from "./localStore";
+import { ConflictKind, syncLocalToCloud } from "./sync";
 import { generateAndUpload } from "./generate";
 import {
-  canRegisterAiTools,
   registerAiTools,
   unregisterAiTools,
   syncAiToolsSilently,
@@ -72,18 +82,43 @@ class MessageTreeItem extends vscode.TreeItem {
   }
 }
 
+/** First row of every view while in local mode. */
+function localModeItem(state: ModeState): MessageTreeItem {
+  const item = new MessageTreeItem("local-mode", "Local mode", describeReason(state.reason), "device-desktop");
+  item.tooltip =
+    `${describeReason(state.reason)}.\n` +
+    `Data is stored on this machine in ${localRoot()} and uploads automatically ` +
+    `when Anamnesis Cloud is reachable.\n${state.detail}\n\nClick to check the connection now.`;
+  item.command = { command: "anamnesis.checkConnection", title: "Check Connection" };
+  return item;
+}
+
+/** Header rows for a view: the local-mode notice or the signed-in user. */
+async function headerItems(withUser: boolean): Promise<Array<MessageTreeItem | UserHeaderTreeItem>> {
+  const state = await modeReady();
+  if (state.mode === "local") {
+    return [localModeItem(state)];
+  }
+  return withUser && state.user ? [new UserHeaderTreeItem(state.user)] : [];
+}
+
+const localSuffix = (id: string | undefined) => (isLocalId(id) ? " · local (not uploaded yet)" : "");
+
 class ProjectTreeItem extends vscode.TreeItem {
   constructor(
     public readonly tag: string,
     public readonly shared: boolean,
     label: string,
-    detail: string
+    detail: string,
+    public readonly local = false
   ) {
     super(label, vscode.TreeItemCollapsibleState.None);
     this.contextValue = shared ? "sharedProject" : "ownedProject";
     this.description = detail;
-    this.iconPath = new vscode.ThemeIcon(shared ? "cloud-download" : "repo");
-    this.tooltip = `Project: ${label}\nTag: ${tag}\n${detail}${shared ? "\nShared (read-only)" : ""}`;
+    this.iconPath = new vscode.ThemeIcon(shared ? "cloud-download" : local ? "device-desktop" : "repo");
+    this.tooltip =
+      `Project: ${label}\nTag: ${tag}\n${detail}${shared ? "\nShared (read-only)" : ""}` +
+      (local ? `\nStored on this machine (${localRoot()})` : "");
     this.command = {
       command: "anamnesis.openGraphForTag",
       title: "Open Graph",
@@ -173,36 +208,8 @@ class ProjectsProvider implements vscode.TreeDataProvider<AnamnesisTreeItem> {
     if (element) {
       return [];
     }
-    const { serverUrl, clientId, secretKey } = config();
-    if (!serverUrl || !clientId || !secretKey) {
-      return [
-        new MessageTreeItem(
-          "configure",
-          "Configure Anamnesis",
-          "Set Client Id and Secret Key in Anamnesis Settings",
-          "warning"
-        ),
-      ];
-    }
-
-    let user: AuthUser | undefined;
-    try {
-      user = await fetchAuthUser();
-    } catch (err) {
-      vscode.window.showWarningMessage(
-        `Anamnesis: authentication failed: ${err instanceof Error ? err.message : err}`
-      );
-      return [
-        new MessageTreeItem(
-          "auth-failed",
-          "Authentication failed",
-          "Check Client Id and Secret Key in Anamnesis Settings",
-          "error"
-        ),
-      ];
-    }
-
-    const items: AnamnesisTreeItem[] = [new UserHeaderTreeItem(user)];
+    const items: AnamnesisTreeItem[] = await headerItems(true);
+    const headerCount = items.length;
 
     try {
       const { projects } = await fetchProjects();
@@ -216,11 +223,12 @@ class ProjectsProvider implements vscode.TreeDataProvider<AnamnesisTreeItem> {
         const edges = p.edges as number;
         const commit = p.built_at_commit ? String(p.built_at_commit).slice(0, 8) : "-";
         const shared = p.shared === true;
+        const isLocal = p.local === true;
         const stats = `${nodes}n / ${edges}e / ${commit}`;
-        const detail = shared ? `${stats} · shared` : stats;
-        items.push(new ProjectTreeItem(tag, shared, tag, detail));
+        const detail = shared ? `${stats} · shared` : isLocal ? `${stats} · local` : stats;
+        items.push(new ProjectTreeItem(tag, shared, tag, detail, isLocal));
       }
-      if (items.length === 1) {
+      if (items.length === headerCount) {
         items.push(
           new MessageTreeItem(
             "none",
@@ -264,33 +272,7 @@ class ProjectPromptsProvider implements vscode.TreeDataProvider<ProjectPromptsTr
     if (element) {
       return [];
     }
-    const { serverUrl, clientId, secretKey } = config();
-    if (!serverUrl || !clientId || !secretKey) {
-      return [
-        new MessageTreeItem(
-          "configure",
-          "Configure Anamnesis",
-          "Set Client Id and Secret Key in Anamnesis Settings",
-          "warning"
-        ),
-      ];
-    }
-
-    try {
-      await fetchAuthUser();
-    } catch (err) {
-      vscode.window.showWarningMessage(
-        `Anamnesis: authentication failed: ${err instanceof Error ? err.message : err}`
-      );
-      return [
-        new MessageTreeItem(
-          "auth-failed",
-          "Authentication failed",
-          "Check Client Id and Secret Key in Anamnesis Settings",
-          "error"
-        ),
-      ];
-    }
+    const header = await headerItems(false);
 
     try {
       const { projects } = await fetchProjects();
@@ -301,7 +283,7 @@ class ProjectPromptsProvider implements vscode.TreeDataProvider<ProjectPromptsTr
         if (!tag || seen.has(tag)) continue;
         seen.add(tag);
         const shared = p.shared === true;
-        const detail = shared ? "shared project" : "view prompts";
+        const detail = shared ? "shared project" : p.local === true ? "view prompts · local" : "view prompts";
         items.push(new ProjectPromptTreeItem(tag, tag, detail));
       }
       if (items.length === 0) {
@@ -314,7 +296,7 @@ class ProjectPromptsProvider implements vscode.TreeDataProvider<ProjectPromptsTr
           )
         );
       }
-      return items;
+      return [...(header as ProjectPromptsTreeItem[]), ...items];
     } catch (err) {
       vscode.window.showWarningMessage(
         `Anamnesis: could not load projects: ${err instanceof Error ? err.message : err}`
@@ -352,21 +334,12 @@ class AiContextProvider implements vscode.TreeDataProvider<AiContextTreeItem> {
     if (element) {
       return [];
     }
-    const { serverUrl, clientId, secretKey } = config();
-    if (!serverUrl || !clientId || !secretKey) {
-      return [
-        new MessageTreeItem(
-          "configure",
-          "Configure Anamnesis",
-          "Set Client Id and Secret Key in Anamnesis Settings",
-          "warning"
-        ),
-      ];
-    }
+    const header = (await headerItems(false)) as AiContextTreeItem[];
     try {
       const rows = await fetchAiContexts();
       if (!rows.length) {
         return [
+          ...header,
           new MessageTreeItem(
             "none",
             "No AI Context yet",
@@ -375,11 +348,14 @@ class AiContextProvider implements vscode.TreeDataProvider<AiContextTreeItem> {
           ),
         ];
       }
-      return rows.map((row: AiContextRow) => {
-        const text = String(row.context || "").replace(/\s+/g, " ").trim();
-        const preview = text.length > 80 ? `${text.slice(0, 80)}…` : text;
-        return new AiContextRecordTreeItem(String(row._id || ""), row.projectName, preview);
-      });
+      return [
+        ...header,
+        ...rows.map((row: AiContextRow) => {
+          const text = String(row.context || "").replace(/\s+/g, " ").trim();
+          const preview = text.length > 80 ? `${text.slice(0, 80)}…` : text;
+          return new AiContextRecordTreeItem(String(row._id || ""), row.projectName, preview + localSuffix(row._id));
+        }),
+      ];
     } catch (err) {
       vscode.window.showWarningMessage(
         `Anamnesis: could not load AI Context: ${err instanceof Error ? err.message : err}`
@@ -412,38 +388,13 @@ class CredentialsProvider implements vscode.TreeDataProvider<CredentialsTreeItem
     if (element) {
       return [];
     }
-    const { serverUrl, clientId, secretKey } = config();
-    if (!serverUrl || !clientId || !secretKey) {
-      return [
-        new MessageTreeItem(
-          "configure",
-          "Configure Anamnesis",
-          "Set Client Id and Secret Key in Anamnesis Settings",
-          "warning"
-        ),
-      ];
-    }
-
-    try {
-      await fetchAuthUser();
-    } catch (err) {
-      vscode.window.showWarningMessage(
-        `Anamnesis: authentication failed: ${err instanceof Error ? err.message : err}`
-      );
-      return [
-        new MessageTreeItem(
-          "auth-failed",
-          "Authentication failed",
-          "Check Client Id and Secret Key in Anamnesis Settings",
-          "error"
-        ),
-      ];
-    }
+    const header = (await headerItems(false)) as CredentialsTreeItem[];
 
     try {
       const rows = await fetchCredentialSets();
       if (!rows.length) {
         return [
+          ...header,
           new MessageTreeItem(
             "none",
             "No credentials yet",
@@ -452,14 +403,17 @@ class CredentialsProvider implements vscode.TreeDataProvider<CredentialsTreeItem
           ),
         ];
       }
-      return rows.map((row: CredentialSetRow) => {
-        const id = String(row._id ?? "");
-        const count = Number(row.keyCount ?? 0);
-        const tags = projectTagsOf(row);
-        const tag = tags.length ? ` · ${tags.join(", ")}` : "";
-        const detail = `${count} key${count === 1 ? "" : "s"}${tag}`;
-        return new CredentialSetTreeItem(id, row.name, detail, row.locked === true);
-      });
+      return [
+        ...header,
+        ...rows.map((row: CredentialSetRow) => {
+          const id = String(row._id ?? "");
+          const count = Number(row.keyCount ?? 0);
+          const tags = projectTagsOf(row);
+          const tag = tags.length ? ` · ${tags.join(", ")}` : "";
+          const detail = `${count} key${count === 1 ? "" : "s"}${tag}${localSuffix(id)}`;
+          return new CredentialSetTreeItem(id, row.name, detail, row.locked === true);
+        }),
+      ];
     } catch (err) {
       vscode.window.showWarningMessage(
         `Anamnesis: could not load credentials: ${err instanceof Error ? err.message : err}`
@@ -781,10 +735,14 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
       try {
-        const projectName = await generateAndUpload(folderUri, context.extensionPath);
-        projectsProvider.refresh();
+        const { projectName, savedTo } = await generateAndUpload(folderUri, context.extensionPath);
+        refreshAllViews();
+        const where =
+          savedTo === "local"
+            ? " and saved on this machine (local mode). It uploads automatically when Anamnesis Cloud is reachable"
+            : "";
         const view = await vscode.window.showInformationMessage(
-          `Anamnesis: knowledge graph created for "${projectName}".`,
+          `Anamnesis: knowledge graph created for "${projectName}"${where}.`,
           "View Knowledge Graph"
         );
         if (view === "View Knowledge Graph") {
@@ -834,8 +792,11 @@ export function activate(context: vscode.ExtensionContext): void {
           );
           return;
         }
+        const isLocal = item instanceof ProjectTreeItem && item.local;
         const confirm = await vscode.window.showWarningMessage(
-          `Delete the knowledge graph for "${tag}" from Anamnesis Cloud?\nThis removes the graph from Redis and the repository record. This cannot be undone.`,
+          isLocal
+            ? `Delete the local knowledge graph for "${tag}"?\nIt is stored on this machine and has not been uploaded. This cannot be undone.`
+            : `Delete the knowledge graph for "${tag}" from Anamnesis Cloud?\nThis removes the graph from Redis and the repository record. This cannot be undone.`,
           { modal: true },
           "Delete"
         );
@@ -902,21 +863,178 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
-  // Activated on startup: start the local credentials MCP server once, then
-  // refresh every MCP config (VS Code, Cursor, Claude Code) with its port and
-  // token. Without Client Id / Secret Key this window cannot decrypt anything,
-  // so it does not host the server; saving settings later triggers the sync.
-  if (!canRegisterAiTools()) {
-    return;
-  }
+  // Status bar shows Cloud / Local / Syncing; click to re-check the connection.
+  statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
+  statusItem.command = "anamnesis.checkConnection";
+  context.subscriptions.push(statusItem);
+  updateStatus();
+  statusItem.show();
+  // Keep the pending-item count fresh after local saves made from panels.
+  const statusTimer = setInterval(updateStatus, 15_000);
+  context.subscriptions.push({ dispose: () => clearInterval(statusTimer) });
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("anamnesis.checkConnection", async () => {
+      statusItem.text = "$(sync~spin) Anamnesis";
+      const state = await probe();
+      updateStatus();
+      if (state.mode === "cloud") {
+        const ran = await runSync(true);
+        if (!ran) {
+          vscode.window.showInformationMessage(`Anamnesis: connected to Anamnesis Cloud. ${state.detail}`);
+        }
+      } else {
+        vscode.window.showWarningMessage(
+          `Anamnesis: local mode. ${describeReason(state.reason)}. ${state.detail}`
+        );
+      }
+    }),
+    vscode.commands.registerCommand("anamnesis.syncLocalData", async () => {
+      const state = await probe();
+      if (state.mode !== "cloud") {
+        vscode.window.showWarningMessage(
+          `Anamnesis: cannot sync. ${describeReason(state.reason)}. Local data stays on this machine.`
+        );
+        return;
+      }
+      const ran = await runSync(true);
+      if (!ran) {
+        vscode.window.showInformationMessage("Anamnesis: nothing to sync. The local store is empty.");
+      }
+    }),
+    onDidChangeMode((state) => {
+      updateStatus();
+      refreshAllViews();
+      if (state.mode === "cloud") {
+        void runSync(false);
+      } else if (state.reason === "unreachable") {
+        vscode.window.showWarningMessage(
+          "Anamnesis: Anamnesis Cloud is unreachable. Switched to local mode: changes are saved on this machine and upload automatically when the connection returns."
+        );
+      }
+    })
+  );
+
+  // The local MCP gateway serves agents in both modes, so start it regardless
+  // of credentials, then refresh every MCP config (VS Code, Cursor, Claude Code).
+  void initModeMonitor(context).then((state) => {
+    updateStatus();
+    refreshAllViews();
+    if (state.mode === "cloud") {
+      void runSync(false);
+    }
+  });
   void startCredentialsMcpServer()
     .then(() => syncAiToolsIfEnabled(context))
     .catch((err) => {
       console.error(
-        "Anamnesis: could not start local credentials MCP server:",
+        "Anamnesis: could not start local MCP gateway:",
         err instanceof Error ? err.message : err
       );
     });
+}
+
+let statusItem: vscode.StatusBarItem;
+let syncing = false;
+
+function refreshAllViews(): void {
+  projectsProvider?.refresh();
+  projectPromptsProvider?.refresh();
+  credentialsProvider?.refresh();
+  aiContextProvider?.refresh();
+  GraphPanel.current?.refresh();
+}
+
+function updateStatus(): void {
+  if (!statusItem) return;
+  const state = getModeState();
+  if (syncing) {
+    statusItem.text = "$(sync~spin) Anamnesis: Syncing";
+    statusItem.tooltip = "Uploading local data to Anamnesis Cloud…";
+    return;
+  }
+  if (state.mode === "cloud") {
+    statusItem.text = "$(cloud) Anamnesis";
+    statusItem.tooltip = `Anamnesis: Cloud mode\n${state.detail}\nClick to re-check.`;
+    statusItem.backgroundColor = undefined;
+  } else {
+    const c = localCounts();
+    const pending = c.graphs + c.prompts + c.aiContexts + c.credentials;
+    statusItem.text = `$(device-desktop) Anamnesis: Local${pending ? ` (${pending})` : ""}`;
+    statusItem.tooltip =
+      `Anamnesis: Local mode. ${describeReason(state.reason)}.\n${state.detail}\n` +
+      `Stored in ${localRoot()}: ${c.graphs} graph(s), ${c.prompts} prompt(s), ` +
+      `${c.aiContexts} AI Context, ${c.credentials} credential set(s).\nClick to re-check the connection.`;
+    statusItem.backgroundColor =
+      state.reason === "auth-failed" ? new vscode.ThemeColor("statusBarItem.warningBackground") : undefined;
+  }
+}
+
+const CONFLICT_LABEL: Record<ConflictKind, string> = {
+  graph: "Knowledge graph",
+  aiContext: "AI Context",
+  credentials: "Credential set",
+};
+
+/**
+ * Upload the local store to the cloud. Returns false when there was nothing
+ * to do. `manual` shows a message even when another window is syncing.
+ */
+async function runSync(manual: boolean): Promise<boolean> {
+  if (syncing || localStoreEmpty()) {
+    return false;
+  }
+  syncing = true;
+  updateStatus();
+  try {
+    const result = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: "Anamnesis: uploading local data", cancellable: false },
+      (progress) =>
+        syncLocalToCloud({
+          progress: (message) => progress.report({ message }),
+          askConflict: async (kind, name, renamedTo) => {
+            const pick = await vscode.window.showQuickPick(
+              [
+                { label: "Overwrite cloud", description: "Replace the cloud copy with the local one", choice: "overwrite" as const },
+                { label: "Keep both", description: `Upload the local copy as "${renamedTo}"`, choice: "rename" as const },
+                { label: "Skip", description: "Keep it on this machine for now (asked again next sync)", choice: "skip" as const },
+              ],
+              {
+                title: `${CONFLICT_LABEL[kind]} "${name}" already exists in Anamnesis Cloud`,
+                placeHolder: "Choose how to upload the local copy",
+                ignoreFocusOut: true,
+              }
+            );
+            return pick?.choice ?? "skip";
+          },
+        })
+    );
+    if (!result) {
+      if (manual) {
+        vscode.window.showInformationMessage("Anamnesis: another window is already uploading local data.");
+      }
+      return true;
+    }
+    const parts = [`uploaded ${result.uploaded}`];
+    if (result.skipped) parts.push(`skipped ${result.skipped} (kept on this machine)`);
+    if (result.failed) parts.push(`failed ${result.failed}`);
+    const summary = `Anamnesis: local data sync ${result.aborted ? "stopped" : "finished"}: ${parts.join(", ")}.`;
+    if (result.failed || result.aborted) {
+      vscode.window.showWarningMessage(`${summary}\n${result.errors.slice(0, 5).join("\n")}`);
+    } else if (result.uploaded || result.skipped) {
+      vscode.window.showInformationMessage(summary);
+    }
+    return true;
+  } catch (err) {
+    vscode.window.showErrorMessage(
+      `Anamnesis: local data sync failed: ${err instanceof Error ? err.message : err}`
+    );
+    return true;
+  } finally {
+    syncing = false;
+    updateStatus();
+    refreshAllViews();
+  }
 }
 
 async function syncAiToolsIfEnabled(context: vscode.ExtensionContext): Promise<void> {

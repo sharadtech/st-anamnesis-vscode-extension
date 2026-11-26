@@ -6,20 +6,22 @@ import { extractRepo } from './graphEngine/ExtractFile';
 import { GitignoreFilter } from './graphEngine/GitignoreFilter';
 import { buildGraph, graphToSerialized } from './graphEngine/GraphBuilder';
 import { clusterGraph } from './graphEngine/Cluster';
-import { createRepo, uploadGraph, config } from './api';
+import { saveGraph } from './api';
 
+export interface GenerateResult {
+  projectName: string;
+  /** "local" when saved to ~/.anamnesis/local (local mode or cloud unreachable). */
+  savedTo: 'cloud' | 'local';
+}
+
+/**
+ * Extraction always runs locally. The graph is uploaded to Anamnesis Cloud,
+ * or kept in the local store in local mode (synced later).
+ */
 export async function generateAndUpload(
   folderUri: vscode.Uri,
   extensionPath: string
-): Promise<string> {
-  const { serverUrl, clientId, secretKey } = config();
-  if (!serverUrl) {
-    throw new Error('No API Base URL configured. Open Anamnesis Settings first.');
-  }
-  if (!clientId || !secretKey) {
-    throw new Error('Client Id and Secret Key are required. Configure them in Anamnesis Settings.');
-  }
-
+): Promise<GenerateResult> {
   const folderPath = folderUri.fsPath;
   const projectName = path.basename(folderPath);
 
@@ -42,6 +44,7 @@ export async function generateAndUpload(
   const gitignoreFilter = respectGitignore ? await GitignoreFilter.create(folderPath) : undefined;
 
   let serialized: ReturnType<typeof graphToSerialized>;
+  let savedTo: 'cloud' | 'local' = 'cloud';
 
   await vscode.window.withProgress(
     {
@@ -78,15 +81,12 @@ export async function generateAndUpload(
         1024
       ).toFixed(1);
 
-      progress.report({ message: 'Registering project on server...' });
-      await createRepo(projectName);
-
       progress.report({
-        message: `Uploading knowledge graph (${payloadMb} MB, ${serialized.nodes.length} symbols)…`,
+        message: `Saving knowledge graph (${payloadMb} MB, ${serialized.nodes.length} symbols)…`,
       });
-      await uploadGraph(projectName, serialized);
+      savedTo = await saveGraph(projectName, serialized);
     }
   );
 
-  return projectName;
+  return { projectName, savedTo };
 }

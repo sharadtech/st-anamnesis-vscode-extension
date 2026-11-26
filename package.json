@@ -196,6 +196,16 @@
         "icon": "$(sparkle)"
       },
       {
+        "command": "anamnesis.checkConnection",
+        "title": "Anamnesis: Check Cloud Connection",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "anamnesis.syncLocalData",
+        "title": "Anamnesis: Upload Local Data to Cloud",
+        "icon": "$(cloud-upload)"
+      },
+      {
         "command": "anamnesis.unregisterAiTools",
         "title": "Anamnesis: Remove AI Tools (MCP + Skill)",
         "icon": "$(trash)"
@@ -222,6 +232,16 @@
           "command": "anamnesis.registerAiTools",
           "when": "view == anamnesis.projects",
           "group": "1_config@1"
+        },
+        {
+          "command": "anamnesis.syncLocalData",
+          "when": "view == anamnesis.projects",
+          "group": "1_config@2"
+        },
+        {
+          "command": "anamnesis.checkConnection",
+          "when": "view == anamnesis.projects",
+          "group": "1_config@3"
         },
         {
           "command": "anamnesis.unregisterAiTools",
@@ -397,6 +417,7 @@
     "package": "node esbuild.js --production && vsce package --no-yarn",
     "publish:marketplace": "set -a && [ -f .env.local ] && . ./.env.local; set +a && npm run package && vsce publish --no-yarn",
     "watch": "node esbuild.js --watch",
+    "test": "node test/run.js",
     "install-cursor:mac": "npm run build && npm run package && cursor --uninstall-extension sharadtech.anamnesis 2>/dev/null || true && cursor --install-extension ./anamnesis-$(node -p \"require('./package.json').version\").vsix",
     "install-vscode:mac": "npm run build && npm run package && code --uninstall-extension sharadtech.anamnesis 2>/dev/null || true && code --install-extension ./anamnesis-$(node -p \"require('./package.json').version\").vsix"
   },

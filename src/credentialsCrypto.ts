@@ -1,5 +1,9 @@
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "crypto";
-import { config, fetchAuthUser } from "./api";
+import { config, fetchAuthUser } from "./cloudApi";
+import { cachedAuthUser, isLocalMode } from "./mode";
 
 export interface CredentialEntry {
   key: string;
@@ -30,12 +34,67 @@ export interface EncryptionContext {
   keyName: string;
 }
 
-export async function getEncryptionContext(): Promise<EncryptionContext> {
+/** keyId stamped on blobs encrypted with the machine-local key. */
+export const LOCAL_KEY_ID = "anamnesis-local";
+
+const localKeyFile = () => path.join(os.homedir(), ".anamnesis", "local.key");
+
+/**
+ * Local-mode key: 32 random bytes in ~/.anamnesis/local.key (0600), shared by
+ * VS Code and Cursor. It keeps the local store unreadable if copied or leaked
+ * on its own; it does not protect against someone who controls this OS account.
+ */
+function loadOrCreateLocalKey(): string {
+  const file = localKeyFile();
+  try {
+    const key = fs.readFileSync(file, "utf-8").trim();
+    if (/^[0-9a-f]{64}$/.test(key)) {
+      return key;
+    }
+  } catch {
+    // create below
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const key = randomBytes(32).toString("hex");
+  try {
+    fs.writeFileSync(file, key + "\n", { encoding: "utf-8", mode: 0o600, flag: "wx" });
+    return key;
+  } catch {
+    // Another window created it first.
+    return fs.readFileSync(file, "utf-8").trim();
+  }
+}
+
+export function getLocalEncryptionContext(): EncryptionContext {
+  return {
+    clientId: "local",
+    userId: "local",
+    secretKey: loadOrCreateLocalKey(),
+    keyId: LOCAL_KEY_ID,
+    keyName: "This machine (local mode)",
+  };
+}
+
+/** Remove the local key once nothing encrypted with it remains. */
+export function deleteLocalKey(): void {
+  try {
+    fs.unlinkSync(localKeyFile());
+  } catch {
+    // already gone
+  }
+}
+
+export function isLocalCipher(cipher: CipherBlob | undefined): boolean {
+  return cipher?.keyId === LOCAL_KEY_ID;
+}
+
+/** Cloud context: Client Id + Secret Key + userId (cached so it works offline). */
+export async function getCloudEncryptionContext(): Promise<EncryptionContext> {
   const { clientId, secretKey } = config();
   if (!clientId || !secretKey) {
     throw new Error("Set Client Id and Secret Key in Anamnesis Settings before saving credentials.");
   }
-  const user = await fetchAuthUser();
+  const user = cachedAuthUser() ?? (await fetchAuthUser());
   if (!user?.userId) {
     throw new Error("Could not resolve the signed-in Anamnesis user.");
   }
@@ -46,6 +105,22 @@ export async function getEncryptionContext(): Promise<EncryptionContext> {
     keyId: user.keyId || "",
     keyName: user.keyName || "",
   };
+}
+
+/** Context for new encryptions: the local key in local mode, otherwise the cloud key. */
+export async function getEncryptionContext(): Promise<EncryptionContext> {
+  return isLocalMode() ? getLocalEncryptionContext() : getCloudEncryptionContext();
+}
+
+/** Re-encrypt a blob for where it is being stored (local store or cloud). */
+export async function reencryptFor(target: "local" | "cloud", cipher: CipherBlob): Promise<CipherBlob> {
+  const local = isLocalCipher(cipher);
+  if ((target === "local") === local) {
+    return cipher;
+  }
+  const fromCtx = local ? getLocalEncryptionContext() : await getCloudEncryptionContext();
+  const toCtx = target === "local" ? getLocalEncryptionContext() : await getCloudEncryptionContext();
+  return encryptCredentialSet(decryptCredentialSet(cipher, fromCtx), toCtx);
 }
 
 const SCRYPT_OPTS = { N: 32768, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
@@ -125,6 +200,10 @@ export function decryptCredentialSet(
   cipher: CipherBlob,
   ctx: EncryptionContext
 ): CredentialEntry[] {
+  // Blobs saved in local mode are always opened with the local key.
+  if (isLocalCipher(cipher) && ctx.keyId !== LOCAL_KEY_ID) {
+    ctx = getLocalEncryptionContext();
+  }
   if (!ctx.clientId || !ctx.userId || !ctx.secretKey) {
     throw new Error("Client Id, user id, and Secret Key are required to decrypt credentials.");
   }
